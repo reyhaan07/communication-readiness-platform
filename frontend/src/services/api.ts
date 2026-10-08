@@ -1800,76 +1800,19 @@ class ApiClient {
       return this.auth.registerCandidate({ name: email.split('@')[0], email });
     },
 
-    requestPasswordReset: async (email: string) => {
-      const cleanEmail = email.toLowerCase().trim();
-      if (!cleanEmail) {
-        throw new Error('Please enter your registered email address.');
-      }
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const resetRecord = {
-        email: cleanEmail,
-        otp,
-        requestedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
-      };
-      this.setStorage(`pwd_reset_${cleanEmail}`, resetRecord);
-      return {
-        success: true,
-        email: cleanEmail,
-        otp,
-        message: `A verification code has been dispatched to ${cleanEmail}.`
-      };
+    // Forgot password: the server emails a 6-digit code (nothing is decided in the browser)
+    requestPasswordReset: async (email: string): Promise<{ message: string }> => {
+      return this.fetchAPI<{ message: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email: email.trim() }),
+      });
     },
 
-    resetPassword: async (data: { email: string; otp: string; newPassword: string }) => {
-      const cleanEmail = data.email.toLowerCase().trim();
-      const cleanOtp = data.otp.trim();
-      const newPwd = data.newPassword.trim();
-
-      if (!cleanEmail) throw new Error('Email is required.');
-      if (!cleanOtp) throw new Error('Please enter the 6-digit verification code.');
-      if (!newPwd || newPwd.length < 6) throw new Error('Password must be at least 6 characters.');
-
-      const record = this.getStorage<any>(`pwd_reset_${cleanEmail}`, null);
-      if (!record && cleanOtp !== '123456') {
-        throw new Error('No active password reset request found for this email. Please request a new code.');
-      }
-      if (record && record.otp !== cleanOtp && cleanOtp !== '123456') {
-        throw new Error('Invalid verification code. Please check your code or use the demo code.');
-      }
-
-      const users = this.getStorage<any[]>('college_registered_users', []);
-      const userIdx = users.findIndex(u => u.email.toLowerCase().trim() === cleanEmail);
-      let user: any;
-      if (userIdx !== -1) {
-        users[userIdx].password = newPwd;
-        user = users[userIdx];
-        this.setStorage('college_registered_users', users);
-      } else {
-        user = {
-          id: `usr_${Date.now()}`,
-          name: cleanEmail.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-          email: cleanEmail,
-          role: 'STUDENT',
-          isIndependent: true,
-          password: newPwd
-        };
-        users.push(user);
-        this.setStorage('college_registered_users', users);
-      }
-
-      localStorage.removeItem(`pwd_reset_${cleanEmail}`);
-
-      const token = `jwt_dyn_${Date.now()}`;
-      this.setToken(token);
-      localStorage.setItem('auth_user', JSON.stringify(user));
-
-      return {
-        success: true,
-        user,
-        token,
-        message: 'Password reset successfully!'
-      };
+    resetPassword: async (data: { email: string; otp: string; newPassword: string }): Promise<{ message: string }> => {
+      return this.fetchAPI<{ message: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify({ email: data.email.trim(), code: data.otp.trim(), newPassword: data.newPassword }),
+      });
     },
 
     registerInstitution: async (data: {

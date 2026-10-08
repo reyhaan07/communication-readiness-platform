@@ -67,7 +67,6 @@ export const AuthModal: React.FC = () => {
   const [forgotNewPassword, setForgotNewPassword] = useState('');
   const [forgotConfirmPassword, setForgotConfirmPassword] = useState('');
   const [forgotStep, setForgotStep] = useState<'REQUEST_OTP' | 'VERIFY_AND_RESET'>('REQUEST_OTP');
-  const [simulatedOtp, setSimulatedOtp] = useState<string | null>(null);
   const [showForgotPwd, setShowForgotPwd] = useState(false);
 
   const [loading, setLoading] = useState(false);
@@ -173,9 +172,8 @@ export const AuthModal: React.FC = () => {
     setLoading(true);
     try {
       const res = await api.auth.requestPasswordReset(forgotEmail.trim());
-      setSimulatedOtp(res.otp);
       setForgotStep('VERIFY_AND_RESET');
-      setSuccessMsg(`Verification code generated for ${res.email}.`);
+      setSuccessMsg(res.message);
     } catch (err: any) {
       setError(err?.message || 'Failed to request password reset code.');
     } finally {
@@ -185,12 +183,12 @@ export const AuthModal: React.FC = () => {
 
   const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!forgotOtp.trim()) {
-      setError('Please enter the 6-digit verification code.');
+    if (!/^\d{6}$/.test(forgotOtp.trim())) {
+      setError('Enter the 6-digit code from the email.');
       return;
     }
-    if (!forgotNewPassword || forgotNewPassword.length < 6) {
-      setError('New password must be at least 6 characters.');
+    if (!forgotNewPassword || forgotNewPassword.length < 8) {
+      setError('New password must be at least 8 characters.');
       return;
     }
     if (forgotNewPassword !== forgotConfirmPassword) {
@@ -200,16 +198,18 @@ export const AuthModal: React.FC = () => {
     setError(null);
     setLoading(true);
     try {
-      const res = await api.auth.resetPassword({
+      await api.auth.resetPassword({
         email: forgotEmail.trim(),
         otp: forgotOtp.trim(),
         newPassword: forgotNewPassword
       });
-      setSuccessMsg('Password updated successfully! Logging you in...');
-      setTimeout(() => {
-        loginWithAuthUser(res.user, res.token);
-        closeAuthModal();
-      }, 700);
+      setSuccessMsg('Password changed. Signing you in...');
+      // A normal sign-in with the new password loads the full profile
+      await loginUser(forgotEmail.trim(), forgotNewPassword);
+      setForgotStep('REQUEST_OTP');
+      setForgotOtp('');
+      setForgotNewPassword('');
+      setForgotConfirmPassword('');
     } catch (err: any) {
       setError(err?.message || 'Failed to reset password. Please check your verification code.');
     } finally {
@@ -516,7 +516,7 @@ export const AuthModal: React.FC = () => {
           {activeTab === 'FORGOT_PASSWORD' && (
             <div className="space-y-4">
               <div className="p-3.5 bg-neutral-50 border border-neutral-200 rounded-xl text-[11px] text-neutral-600 leading-relaxed">
-                <strong>Universal Account Recovery:</strong> Enter your registered email address (students, faculty staff, counsellors, or administrators). We will issue a 6-digit verification code to securely reset your password.
+                <strong>Forgot your password?</strong> Enter the email you sign in with. We will email you a 6-digit code that resets your password; it expires in 15 minutes.
               </div>
 
               {forgotStep === 'REQUEST_OTP' ? (
@@ -544,10 +544,10 @@ export const AuthModal: React.FC = () => {
                     {loading ? (
                       <>
                         <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                        <span>Generating Verification Code...</span>
+                        <span>Sending code...</span>
                       </>
                     ) : (
-                      <span>Send Password Reset Code</span>
+                      <span>Email me a reset code</span>
                     )}
                   </button>
 
@@ -563,14 +563,9 @@ export const AuthModal: React.FC = () => {
                 </form>
               ) : (
                 <form onSubmit={handleResetPasswordSubmit} className="space-y-3.5">
-                  {simulatedOtp && (
-                    <div className="p-3 bg-neutral-50 border border-neutral-200 rounded-xl text-xs text-neutral-800 flex items-center justify-between">
-                      <span className="font-medium text-[11px] text-neutral-600">Verification Code:</span>
-                      <span className="font-mono text-xs font-bold bg-neutral-200 text-neutral-900 px-2 py-0.5 rounded">
-                        {simulatedOtp}
-                      </span>
-                    </div>
-                  )}
+                  <p className="text-[11px] text-neutral-500 leading-relaxed">
+                    Check your inbox for the code (and the spam folder if it is not there). Only the most recent code works.
+                  </p>
 
                   <div>
                     <label className="block text-xs font-medium text-neutral-700 mb-1">Email</label>
@@ -590,8 +585,10 @@ export const AuthModal: React.FC = () => {
                         type="text"
                         required
                         maxLength={6}
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
                         value={forgotOtp}
-                        onChange={(e) => setForgotOtp(e.target.value)}
+                        onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, ''))}
                         placeholder="e.g. 123456"
                         className="w-full pl-9 pr-3 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-xs font-mono text-neutral-900 focus:outline-none focus:border-neutral-900 transition-colors"
                       />
@@ -607,7 +604,7 @@ export const AuthModal: React.FC = () => {
                         required
                         value={forgotNewPassword}
                         onChange={(e) => setForgotNewPassword(e.target.value)}
-                        placeholder="At least 6 characters"
+                        placeholder="At least 8 characters"
                         className="w-full pl-9 pr-10 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-xs focus:outline-none focus:border-neutral-900 transition-colors"
                       />
                       <button
@@ -643,10 +640,10 @@ export const AuthModal: React.FC = () => {
                     {loading ? (
                       <>
                         <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                        <span>Updating Password &amp; Signing In...</span>
+                        <span>Changing password...</span>
                       </>
                     ) : (
-                      <span>Reset Password &amp; Launch Studio</span>
+                      <span>Change password &amp; sign in</span>
                     )}
                   </button>
 
@@ -656,7 +653,7 @@ export const AuthModal: React.FC = () => {
                       onClick={() => { setForgotStep('REQUEST_OTP'); setError(null); }}
                       className="text-neutral-500 hover:text-neutral-900 cursor-pointer"
                     >
-                      ← Request a different code
+                      ← Send a new code
                     </button>
                     <button
                       type="button"

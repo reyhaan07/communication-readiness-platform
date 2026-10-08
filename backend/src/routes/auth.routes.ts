@@ -13,6 +13,7 @@ import { Events, UserRegisteredPayload } from '../shared/events/events';
 import { UserRole } from '../shared/types/roles';
 import { AuthUser } from '../shared/types/auth';
 import { lockedForSeconds, recordFailure, clearFailures } from '../shared/security/loginThrottle';
+import { emailConfigured, sendPasswordResetCode } from '../services/emailService';
 import crypto from 'crypto';
 
 export const authRouter = Router();
@@ -300,6 +301,155 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
       user: { id: user.id, name: user.name, email: user.email, role: user.role },
       studentId,
     });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// ── POST /api/auth/forgot-password ─────────────────────────────────────────────
+// Emails a 6-digit code. The answer is the same whether or not the email has an
+// account, so the form cannot be used to find out who is registered.
+
+const RESET_CODE_MINUTES = 15;
+const RESET_MAX_ATTEMPTS = 5;
+const RESET_CODES_PER_WINDOW = 3;
+
+const forgotSchema = z.object({
+  email: z.string().trim().email('Enter a valid email address').transform(s => s.toLowerCase()),
+});
+
+authRouter.post('/forgot-password', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const parsed = forgotSchema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(422, firstIssue(parsed.error), 'VALIDATION_ERROR');
+    const { email } = parsed.data;
+    const ip = req.ip ?? 'unknown';
+
+    if (!emailConfigured()) {
+      throw new AppError(503,
+        'Password reset by email is not set up on this site yet. Ask your administrator to reset your password.',
+        'EMAIL_NOT_CONFIGURED');
+    }
+    // Per IP: at most a handful of requests per window, whatever the email
+    if (lockedForSeconds(ip, 'forgot-password') > 0) {
+      throw new AppError(429, 'Too many reset requests. Please wait a few minutes and try again.', 'TOO_MANY_ATTEMPTS');
+    }
+    recordFailure(ip, 'forgot-password');
+
+    const sent = {
+      message: `If an account exists for ${email}, we have emailed it a 6-digit code. It expires in ${RESET_CODE_MINUTES} minutes.`,
+    };
+    const { rows } = await db.query<{ id: string; name: string; status: string; is_active: boolean }>(
+      'SELECT id, name, status, is_active FROM identity.users WHERE email = $1', [email]
+    );
+    const user = rows[0];
+    if (!user || accountBlock(user.status, user.is_active)) { sendSuccess(res, sent); return; }
+
+    const { rows: recent } = await db.query<{ n: string }>(
+      `SELECT count(*) AS n FROM identity.password_resets
+       WHERE user_id = $1 AND created_at > now() - make_interval(mins => $2)`,
+      [user.id, RESET_CODE_MINUTES]
+    );
+    if (Number(recent[0].n) >= RESET_CODES_PER_WINDOW) { sendSuccess(res, sent); return; }
+
+    const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+    const codeHash = await bcrypt.hash(code, 10);
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      // Only the newest code works
+      await client.query(
+        'UPDATE identity.password_resets SET used_at = now() WHERE user_id = $1 AND used_at IS NULL', [user.id]
+      );
+      await client.query(
+        `INSERT INTO identity.password_resets (user_id, code_hash, expires_at)
+         VALUES ($1, $2, now() + make_interval(mins => $3))`,
+        [user.id, codeHash, RESET_CODE_MINUTES]
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    try {
+      await sendPasswordResetCode({ to: email, name: user.name, code, minutes: RESET_CODE_MINUTES });
+    } catch (mailErr) {
+      console.error('[auth] password reset email failed:', (mailErr as Error).message);
+      throw new AppError(502, 'The reset email could not be sent. Please try again in a few minutes.', 'EMAIL_FAILED');
+    }
+    sendSuccess(res, sent);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// ── POST /api/auth/reset-password ──────────────────────────────────────────────
+// Checks the emailed code and sets the new password. Every existing session of the
+// account is signed out, since whoever had the old password should lose access.
+
+const resetSchema = z.object({
+  email: z.string().trim().email('Enter a valid email address').transform(s => s.toLowerCase()),
+  code: z.string().trim().regex(/^\d{6}$/, 'Enter the 6-digit code from the email'),
+  newPassword: z.string().min(8, 'Password must be at least 8 characters'),
+});
+
+authRouter.post('/reset-password', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const parsed = resetSchema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(422, firstIssue(parsed.error), 'VALIDATION_ERROR');
+    const { email, code, newPassword } = parsed.data;
+    const invalid = new AppError(400, 'That code is not valid or has expired. Check the email or request a new code.', 'INVALID_RESET_CODE');
+
+    const { rows: users } = await db.query<{ id: string; status: string; is_active: boolean }>(
+      'SELECT id, status, is_active FROM identity.users WHERE email = $1', [email]
+    );
+    const user = users[0];
+    if (!user) throw invalid;
+    const blocked = accountBlock(user.status, user.is_active);
+    if (blocked) throw blocked;
+
+    const { rows: codes } = await db.query<{ id: string; code_hash: string; attempts: number }>(
+      `SELECT id, code_hash, attempts FROM identity.password_resets
+       WHERE user_id = $1 AND used_at IS NULL AND expires_at > now()
+       ORDER BY created_at DESC LIMIT 1`,
+      [user.id]
+    );
+    const active = codes[0];
+    if (!active || active.attempts >= RESET_MAX_ATTEMPTS) throw invalid;
+
+    if (!(await bcrypt.compare(code, active.code_hash))) {
+      await db.query('UPDATE identity.password_resets SET attempts = attempts + 1 WHERE id = $1', [active.id]);
+      const left = RESET_MAX_ATTEMPTS - active.attempts - 1;
+      throw left > 0
+        ? new AppError(400, `That code is not correct. ${left} attempt${left === 1 ? '' : 's'} left.`, 'INVALID_RESET_CODE')
+        : new AppError(400, 'Too many wrong codes. Request a new code.', 'INVALID_RESET_CODE');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE identity.users
+         SET password_hash = $1, token_version = token_version + 1, updated_at = now()
+         WHERE id = $2`,
+        [passwordHash, user.id]
+      );
+      await client.query(
+        'UPDATE identity.password_resets SET used_at = now() WHERE user_id = $1 AND used_at IS NULL', [user.id]
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
+    clearFailures(req.ip ?? 'unknown', email);
+    sendSuccess(res, { message: 'Your password has been changed. Sign in with the new password.' });
   } catch (err) {
     sendError(res, err);
   }
