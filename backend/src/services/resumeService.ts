@@ -22,12 +22,22 @@ export interface ResumeProject {
   description: string;
 }
 
+export interface ResumeExperience { title: string; company: string; duration: string; description: string }
+export interface ResumeEducation { degree: string; institution: string; year: string }
+export interface ResumeLinks { github: string | null; linkedin: string | null; portfolio: string | null }
+
 // Stored in org.resumes.parsed_data; also the shape the frontend shows (ParsedResume)
 export interface ParsedResumeData {
   summary: string;
   skills: ResumeSkills;
   projects: ResumeProject[];
+  experience: ResumeExperience[];
+  education: ResumeEducation[];
+  certifications: string[];
+  links: ResumeLinks;
 }
+
+const EMPTY_LINKS: ResumeLinks = { github: null, linkedin: null, portfolio: null };
 
 export interface ParsedResumeView extends ParsedResumeData {
   fileName: string;
@@ -39,6 +49,10 @@ interface AiParseResponse {
   summary?: string;
   skills?: Partial<ResumeSkills>;
   projects?: { title: string; tech_stack?: string[]; description?: string }[];
+  experience?: Partial<ResumeExperience>[];
+  education?: Partial<ResumeEducation>[];
+  certifications?: string[];
+  links?: Partial<ResumeLinks>;
 }
 
 const strings = (values: unknown): string[] =>
@@ -81,8 +95,36 @@ export async function parseResume(input: { fileName: string; buffer?: Buffer; te
         techStack: strings(p.tech_stack),
         description: String(p.description ?? ''),
       })),
+      experience: experienceList(response.experience),
+      education: educationList(response.education),
+      certifications: strings(response.certifications),
+      links: linkSet(response.links),
     },
   };
+}
+
+function experienceList(values: unknown): ResumeExperience[] {
+  return (Array.isArray(values) ? values : [])
+    .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+    .map((e) => ({
+      title: String(e.title ?? ''), company: String(e.company ?? ''),
+      duration: String(e.duration ?? ''), description: String(e.description ?? ''),
+    }))
+    .filter((e) => e.title || e.company);
+}
+
+function educationList(values: unknown): ResumeEducation[] {
+  return (Array.isArray(values) ? values : [])
+    .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+    .map((e) => ({ degree: String(e.degree ?? ''), institution: String(e.institution ?? ''), year: String(e.year ?? '') }))
+    .filter((e) => e.degree || e.institution);
+}
+
+// Only https links survive (the AI service already checked they appear in the resume)
+function linkSet(value: unknown): ResumeLinks {
+  const raw = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const safe = (v: unknown) => (typeof v === 'string' && /^https:\/\/[^\s]+$/i.test(v) ? v : null);
+  return { github: safe(raw.github), linkedin: safe(raw.linkedin), portfolio: safe(raw.portfolio) };
 }
 
 /**
@@ -141,7 +183,13 @@ function normaliseData(raw: unknown): ParsedResumeData | null {
       techStack: strings(p.techStack ?? p.tech_stack),
       description: String(p.description ?? ''),
     }));
-  return { summary: String(data.summary ?? ''), skills, projects };
+  return {
+    summary: String(data.summary ?? ''), skills, projects,
+    experience: experienceList(data.experience),
+    education: educationList(data.education),
+    certifications: strings(data.certifications),
+    links: linkSet(data.links),
+  };
 }
 
 /** The student's current resume as stored, or null when none was parsed. */
@@ -158,7 +206,10 @@ export async function getCurrentResume(studentId: string): Promise<{ view: Parse
     view: {
       fileName: row.file_name || 'Resume',
       parsedAt: new Date(row.updated_at).toISOString().split('T')[0],
-      ...(data ?? { summary: '', skills: { languages: [], frameworks: [], databases: [], tools: [] }, projects: [] }),
+      ...(data ?? {
+        summary: '', skills: { languages: [], frameworks: [], databases: [], tools: [] }, projects: [],
+        experience: [], education: [], certifications: [], links: EMPTY_LINKS,
+      }),
     },
     text: row.parsed_text ?? '',
   };

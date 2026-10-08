@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { safeHttpUrl } from '../../utils/safeUrl';
 import { useApp } from '../../context/AppContext';
 import { InterviewAssignment, ImprovementChecklistItem } from '../../types';
 import { 
@@ -710,6 +711,90 @@ export const StudentDashboard: React.FC = () => {
                       )}
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* Work Experience */}
+            {(student.resume?.experience?.length ?? 0) > 0 && (
+              <div className="space-y-3 pt-2">
+                <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">Work Experience</h3>
+                <div className="space-y-3">
+                  {(student.resume?.experience ?? []).map((exp: any, idx: number) => (
+                    <div key={idx} className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200/80 text-xs space-y-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h4 className="font-bold text-neutral-900 text-sm">{exp.title}</h4>
+                          <p className="text-neutral-600 font-medium">{exp.company}</p>
+                        </div>
+                        {exp.duration && (
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-neutral-200 text-neutral-700 font-mono font-semibold shrink-0">
+                            {exp.duration}
+                          </span>
+                        )}
+                      </div>
+                      {exp.description && (
+                        <p className="text-xs text-neutral-600 leading-relaxed">{exp.description}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Education */}
+            {(student.resume?.education?.length ?? 0) > 0 && (
+              <div className="space-y-3 pt-2">
+                <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">Education</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {(student.resume?.education ?? []).map((edu: any, idx: number) => (
+                    <div key={idx} className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200/80 text-xs space-y-1">
+                      <h4 className="font-bold text-neutral-900">{edu.degree}</h4>
+                      <p className="text-neutral-600">{edu.institution}</p>
+                      {edu.year && <p className="text-[10px] font-mono text-neutral-400">{edu.year}</p>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Certifications */}
+            {(student.resume?.certifications?.length ?? 0) > 0 && (
+              <div className="space-y-3 pt-2">
+                <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">Certifications</h3>
+                <div className="flex flex-wrap gap-2">
+                  {(student.resume?.certifications ?? []).map((cert: string, idx: number) => (
+                    <span key={idx} className="px-3 py-1.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-semibold text-emerald-800">
+                      {cert}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Links */}
+            {[student.resume?.links?.github, student.resume?.links?.linkedin, student.resume?.links?.portfolio].some((u) => safeHttpUrl(u)) && (
+              <div className="space-y-3 pt-2">
+                <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">Links</h3>
+                <div className="flex flex-wrap gap-2">
+                  {safeHttpUrl(student.resume?.links?.github) && (
+                    <a href={safeHttpUrl(student.resume?.links?.github) ?? undefined} target="_blank" rel="noopener noreferrer"
+                      className="px-3 py-1.5 bg-neutral-100 border border-neutral-200 rounded-xl text-xs font-mono font-semibold text-neutral-700 hover:bg-neutral-200 transition-colors">
+                      GitHub ↗
+                    </a>
+                  )}
+                  {safeHttpUrl(student.resume?.links?.linkedin) && (
+                    <a href={safeHttpUrl(student.resume?.links?.linkedin) ?? undefined} target="_blank" rel="noopener noreferrer"
+                      className="px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl text-xs font-mono font-semibold text-blue-700 hover:bg-blue-100 transition-colors">
+                      LinkedIn ↗
+                    </a>
+                  )}
+                  {safeHttpUrl(student.resume?.links?.portfolio) && (
+                    <a href={safeHttpUrl(student.resume?.links?.portfolio) ?? undefined} target="_blank" rel="noopener noreferrer"
+                      className="px-3 py-1.5 bg-purple-50 border border-purple-200 rounded-xl text-xs font-mono font-semibold text-purple-700 hover:bg-purple-100 transition-colors">
+                      Portfolio ↗
+                    </a>
+                  )}
                 </div>
               </div>
             )}

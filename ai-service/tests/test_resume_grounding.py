@@ -141,6 +141,43 @@ def test_parse_falls_back_to_text_when_llm_fails():
     assert res.json()["projects"] == [] and res.json()["text"].startswith("Priya")
 
 
+FULL_RESUME = RESUME_TEXT + (
+    "Education\nB.Tech Computer Science, VIT Vellore, 2022-2026\n"
+    "Certifications\nAWS Certified Cloud Practitioner\n"
+    "github.com/priyasharma  linkedin.com/in/priya-sharma\n"
+)
+
+
+def test_parse_keeps_real_experience_education_certifications_and_links():
+    payload = {
+        "experience": [
+            {"title": "Backend Intern", "company": "Acme Labs", "duration": "2025", "description": "Built REST APIs."},
+            {"title": "SDE Intern", "company": "Google", "duration": "2024", "description": "invented"},
+        ],
+        "education": [
+            {"degree": "B.Tech Computer Science", "institution": "VIT Vellore", "year": "2022-2026"},
+            {"degree": "MBA", "institution": "Harvard Business School", "year": "2020"},
+        ],
+        "certifications": ["AWS Certified Cloud Practitioner", "Oracle Certified Java Professional"],
+        "links": {
+            "github": "https://github.com/priyasharma",
+            "linkedin": "linkedin.com/in/priya-sharma",
+            "portfolio": "javascript:alert(1)",
+        },
+    }
+    with patch("app.routers.interview.get_llm_client", return_value=fake_llm(payload)):
+        res = client.post("/ai/parse-resume", json={"text": FULL_RESUME})
+    body = res.json()
+    assert [e["company"] for e in body["experience"]] == ["Acme Labs"]           # Google is not on the resume
+    assert [e["institution"] for e in body["education"]] == ["VIT Vellore"]       # Harvard is not on the resume
+    assert body["certifications"] == ["AWS Certified Cloud Practitioner"]
+    assert body["links"] == {
+        "github": "https://github.com/priyasharma",
+        "linkedin": "https://linkedin.com/in/priya-sharma",
+        "portfolio": None,                                                       # not a real link
+    }
+
+
 # ── Resume-grounded question generation ───────────────────────────────────────
 
 def _question_request(focus: str) -> dict:

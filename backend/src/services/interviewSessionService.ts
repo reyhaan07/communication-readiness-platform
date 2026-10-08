@@ -132,15 +132,23 @@ const cleanList = (values: unknown[] | undefined, max: number) =>
 async function loadResume(studentId: string, name: string): Promise<InterviewResume> {
   const current = await getCurrentResume(studentId);
   if (!current) return { name, skills: [], projects: [] };
-  const { skills, projects } = current.view;
+  const { skills, projects, experience } = current.view;
   return {
     name,
     skills: cleanList([...skills.languages, ...skills.frameworks, ...skills.databases, ...skills.tools], 20),
-    projects: projects.slice(0, 6).map((p) => ({
-      title: p.title.slice(0, 120),
-      tech_stack: cleanList(p.techStack, 10),
-      description: p.description.slice(0, 400),
-    })).filter((p) => p.title),
+    projects: [
+      ...projects.slice(0, 6).map((p) => ({
+        title: p.title.slice(0, 120),
+        tech_stack: cleanList(p.techStack, 10),
+        description: p.description.slice(0, 400),
+      })),
+      // Internships and jobs are interview topics too
+      ...experience.slice(0, 3).map((e) => ({
+        title: [e.title, e.company].filter(Boolean).join(' at ').slice(0, 120),
+        tech_stack: [],
+        description: [e.duration, e.description].filter(Boolean).join(': ').slice(0, 400),
+      })),
+    ].filter((p) => p.title),
     text: current.text.slice(0, RESUME_EXCERPT_CHARS),
   };
 }

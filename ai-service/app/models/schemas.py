@@ -56,11 +56,34 @@ class ResumeProject(BaseModel):
     description: str = ""
 
 
+class ResumeExperience(BaseModel):
+    title: str = ""
+    company: str = ""
+    duration: str = ""
+    description: str = ""
+
+
+class ResumeEducation(BaseModel):
+    degree: str = ""
+    institution: str = ""
+    year: str = ""
+
+
+class ResumeLinks(BaseModel):
+    github: str | None = None
+    linkedin: str | None = None
+    portfolio: str | None = None
+
+
 class ResumeParseResponse(BaseModel):
     text: str
     summary: str = ""
     skills: ResumeSkills = Field(default_factory=ResumeSkills)
     projects: list[ResumeProject] = Field(default_factory=list)
+    experience: list[ResumeExperience] = Field(default_factory=list)
+    education: list[ResumeEducation] = Field(default_factory=list)
+    certifications: list[str] = Field(default_factory=list)
+    links: ResumeLinks = Field(default_factory=ResumeLinks)
 
 
 class GeneratedQuestionResponse(BaseModel):

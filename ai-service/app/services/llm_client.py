@@ -83,7 +83,12 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            import logging
+            logging.getLogger(__name__).error("LLM returned non-JSON output: %s", raw[:500])
+            raise ValueError(f"LLM returned non-JSON output: {exc}") from exc
 
     # Questions benefit from variety; scoring must be repeatable — the same answer
     # should get the same score, so evaluations run at a near-zero temperature.
