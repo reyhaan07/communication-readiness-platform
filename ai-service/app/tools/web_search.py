@@ -31,10 +31,14 @@ _MAX_YOUTUBE_RESULTS = 1
 _MAX_SNIPPET_CHARS   = 200
 
 # Module-level import so tests can patch `app.tools.web_search.DDGS`.
+# `ddgs` is the package's current name; requirements.txt installs it as duckduckgo-search.
 try:
     from ddgs import DDGS  # type: ignore[import]
 except ImportError:
-    DDGS = None  # type: ignore[assignment,misc]
+    try:
+        from duckduckgo_search import DDGS  # type: ignore[import,no-redef]
+    except ImportError:
+        DDGS = None  # type: ignore[assignment,misc]
 
 
 # ── Skill classification ───────────────────────────────────────────────────────

@@ -131,6 +131,9 @@ export async function handleAttemptCompleted(payload: AttemptCompletedPayload): 
         [studentId, technicalScore ?? null, communicationScore ?? null, listeningScore ?? null, overallScore]
       );
       await client.query('COMMIT');
+      // A first interview (e.g. an account with no profile yet) still gets its plan
+      invalidateStudentCache(studentId);
+      triggerModule3Agent(studentId, payload.goal, payload.attemptId);
       return;
     }
 

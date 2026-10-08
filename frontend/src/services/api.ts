@@ -14,7 +14,8 @@ import {
   AdminPermission,
   AuthUser,
   DepartmentClass,
-  DepartmentStaffMember
+  DepartmentStaffMember,
+  CurrentLearningPlan
 } from '../types';
 import { 
   DEFAULT_CLEAN_STUDENT,
@@ -2978,6 +2979,27 @@ class ApiClient {
         console.error('Get learning plans error:', error);
         return [];
       }
+    },
+
+    // The 4-week plan built from the latest mock interview, with its build status
+    getCurrentPlan: async (studentId: string): Promise<CurrentLearningPlan> => {
+      return this.fetchAPI<CurrentLearningPlan>(`/learning/plans/${studentId}/current`);
+    },
+
+    setPlanTask: async (planId: string, taskId: string, done: boolean): Promise<Record<string, string>> => {
+      const response = await this.fetchAPI<{ progress: Record<string, string> }>(
+        `/learning/plans/${planId}/progress`,
+        { method: 'PATCH', body: JSON.stringify({ taskId, done }) }
+      );
+      return response.progress || {};
+    },
+
+    rebuildPlan: async (studentId: string): Promise<string> => {
+      const response = await this.fetchAPI<{ agentRunId: string }>(
+        `/learning/plans/${studentId}/rebuild`,
+        { method: 'POST' }
+      );
+      return response.agentRunId;
     },
 
     getRecommendations: async (studentId: string): Promise<any[]> => {

@@ -15,7 +15,6 @@ import {
   DynamicProgram,
   AppNotification,
   AdminPermission,
-  ImprovementChecklistItem,
   College
 } from '../types';
 import {
@@ -1421,28 +1420,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         timestamp: Date.now()
       });
 
-      // Stack newly generated results onto Post-Interview Actionable Improvement Checklist
-      try {
-        const sKey = student.id || 'stu-21cs1084';
-        const saved = localStorage.getItem(`student_improvement_checklist_${sKey}`);
-        const currentList: ImprovementChecklistItem[] = saved ? JSON.parse(saved) : [];
-        const newItems: ImprovementChecklistItem[] = (report.actionableNextSteps || []).map((step, idx) => ({
-          id: `chk_${report!.id}_${idx}_${Date.now()}`,
-          week: `Target ${currentList.length + idx + 1}`,
-          title: step.length > 50 ? (step.split('.')[0] || step.slice(0, 48)) + '...' : step,
-          description: step,
-          category: (idx % 2 === 0 ? 'COMMUNICATION' : 'TECHNICAL') as any,
-          isCompleted: false
-        }));
-
-        if (newItems.length > 0) {
-          const updated = [...currentList, ...newItems];
-          localStorage.setItem(`student_improvement_checklist_${sKey}`, JSON.stringify(updated));
-          window.dispatchEvent(new Event('storage'));
-        }
-      } catch (err) {
-        console.warn('Failed stacking report on checklist:', err);
-      }
+      // The 4-week plan is built server-side from this interview; the dashboard picks it up
 
       setIsEvaluationPending(false);
     }, 4500);

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { safeHttpUrl } from '../../utils/safeUrl';
 import { useApp } from '../../context/AppContext';
-import { InterviewAssignment, ImprovementChecklistItem } from '../../types';
+import { InterviewAssignment } from '../../types';
 import { 
   Mic, 
   Headphones, 
@@ -31,6 +31,8 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { ResumeUploadModal } from './ResumeUploadModal';
+import { LearningPlanPanel } from './LearningPlanPanel';
+import { useLearningPlan } from '../../hooks/useLearningPlan';
 import { useBackHandler } from '../../hooks/useBackHandler';
 import { api } from '../../services/api';
 import { isAssignmentElapsed } from '../common/AssessmentMonitoringWidget';
@@ -193,181 +195,32 @@ export const StudentDashboard: React.FC = () => {
     setFetchingGhStats(false);
   };
 
-  // Post-Interview Actionable Improvement Checklist State
-  // Initialized from saved storage, or generated if reports exist, otherwise empty
-  const [checklist, setChecklist] = useState<ImprovementChecklistItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(`student_improvement_checklist_${student.id}`);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch {}
+  // The 4-week plan the learning agent builds from the latest mock interview
+  const learningPlan = useLearningPlan(student.id, latestReport?.id);
+  const isStudentViewer = currentUser?.role === 'STUDENT';
 
-    // If student has reports or previous interviews, populate initial post-interview improvement milestones
-    const hasHistory = (student.recentReports && student.recentReports.length > 0) || Boolean(latestReport);
-    if (hasHistory) {
-      return [
-        {
-          id: 'chk_w1',
-          week: 'Week 1',
-          title: 'Speech Pacing & Filler Word Reduction',
-          description: 'Keep verbal pace between 115-130 WPM and reduce filler words ("um", "uh", "like") to under 3 per question turn.',
-          category: 'COMMUNICATION',
-          isCompleted: true,
-          completedAt: '2026-09-27'
-        },
-        {
-          id: 'chk_w2',
-          week: 'Week 2',
-          title: 'Core Architecture Trade-Offs & Edge Cases',
-          description: 'Vocalize algorithmic trade-offs (e.g. time-space complexity, hashing collisions, thread safety) before writing code.',
-          category: 'TECHNICAL',
-          isCompleted: false
-        },
-        {
-          id: 'chk_w3',
-          week: 'Week 3',
-          title: 'Resume Project Deep-Dive & Microservices',
-          description: 'Prepare structured STAR-format justification of database indexing, caching strategies, and concurrency bottlenecks.',
-          category: 'SYSTEM_DESIGN',
-          isCompleted: false
-        },
-        {
-          id: 'chk_w4',
-          week: 'Week 4',
-          title: 'Final Full-Length Proctored Mock Run',
-          description: 'Achieve at least 80% on a full 3-turn voice-to-voice proctored technical interview under strict camera focus.',
-          category: 'CODING',
-          isCompleted: false
-        }
-      ];
+  // Overall Readiness %: share of the plan's tasks and weekly checkpoints completed
+  const totalChecklistCount = learningPlan.total;
+  const completedChecklistCount = learningPlan.completed;
+  const overallReadinessScore = totalChecklistCount === 0
+    ? 0
+    : Math.round((completedChecklistCount / totalChecklistCount) * 100);
+
+  const startMockInterview = () => {
+    if (typeof document !== 'undefined' && !document.fullscreenElement && document.documentElement.requestFullscreen) {
+      document.documentElement.requestFullscreen().catch(() => {});
     }
+    startInterview('MOCK_INTERVIEW');
+  };
 
-    return [];
-  });
-
-  // Sync coding handles and checklist whenever current student switches/impersonated
+  // Sync coding handles whenever the current student switches/impersonated
   useEffect(() => {
     setLcUsername(student.codingHandles?.leetcode || '');
     setLcSolvedCount(student.codingHandles?.leetcodeSolved ?? 0);
     setGhUsername(student.codingHandles?.github || '');
     setGhReposCount(student.codingHandles?.githubRepos ?? 0);
     setOtherProfiles(student.codingHandles?.otherProfiles || []);
-
-    try {
-      const saved = localStorage.getItem(`student_improvement_checklist_${student.id}`);
-      if (saved) {
-        setChecklist(JSON.parse(saved));
-        return;
-      }
-    } catch {}
-
-    const hasHistory = (student.recentReports && student.recentReports.length > 0) || Boolean(latestReport);
-    if (hasHistory) {
-      setChecklist([
-        {
-          id: 'chk_w1',
-          week: 'Week 1',
-          title: 'Speech Pacing & Filler Word Reduction',
-          description: 'Keep verbal pace between 115-130 WPM and reduce filler words ("um", "uh", "like") to under 3 per question turn.',
-          category: 'COMMUNICATION',
-          isCompleted: true,
-          completedAt: '2026-09-27'
-        },
-        {
-          id: 'chk_w2',
-          week: 'Week 2',
-          title: 'Core Architecture Trade-Offs & Edge Cases',
-          description: 'Vocalize algorithmic trade-offs (e.g. time-space complexity, hashing collisions, thread safety) before writing code.',
-          category: 'TECHNICAL',
-          isCompleted: false
-        },
-        {
-          id: 'chk_w3',
-          week: 'Week 3',
-          title: 'Resume Project Deep-Dive & Microservices',
-          description: 'Prepare structured STAR-format justification of database indexing, caching strategies, and concurrency bottlenecks.',
-          category: 'SYSTEM_DESIGN',
-          isCompleted: false
-        },
-        {
-          id: 'chk_w4',
-          week: 'Week 4',
-          title: 'Final Full-Length Proctored Mock Run',
-          description: 'Achieve at least 80% on a full 3-turn voice-to-voice proctored technical interview under strict camera focus.',
-          category: 'CODING',
-          isCompleted: false
-        }
-      ]);
-    } else {
-      setChecklist([]);
-    }
   }, [student.id, student.name]);
-
-  // Listen for storage events (e.g. from background async evaluation in AppContext)
-  useEffect(() => {
-    const handleStorageChange = () => {
-      try {
-        const sKey = student.id || 'stu-21cs1084';
-        const saved = localStorage.getItem(`student_improvement_checklist_${sKey}`);
-        if (saved) {
-          setChecklist(JSON.parse(saved));
-        }
-      } catch {}
-    };
-    window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
-  }, [student.id]);
-
-  // Ensure newly completed latestReport results stack up onto the Post-Interview Checklist
-  useEffect(() => {
-    if (!latestReport?.id) return;
-    const sKey = student.id || 'stu-21cs1084';
-    let currentList: ImprovementChecklistItem[] = [];
-    try {
-      const saved = localStorage.getItem(`student_improvement_checklist_${sKey}`);
-      if (saved) currentList = JSON.parse(saved);
-      else currentList = [...checklist];
-    } catch {
-      currentList = [...checklist];
-    }
-
-    const alreadyStacked = currentList.some(item => item.id.includes(latestReport.id));
-    if (!alreadyStacked && latestReport.actionableNextSteps && latestReport.actionableNextSteps.length > 0) {
-      const newItems: ImprovementChecklistItem[] = latestReport.actionableNextSteps.map((step, idx) => ({
-        id: `chk_${latestReport.id}_${idx}_${Date.now()}`,
-        week: `Target ${currentList.length + idx + 1}`,
-        title: step.length > 50 ? (step.split('.')[0] || step.slice(0, 48)) + '...' : step,
-        description: step,
-        category: (idx % 2 === 0 ? 'COMMUNICATION' : 'TECHNICAL') as any,
-        isCompleted: false
-      }));
-
-      const updated = [...currentList, ...newItems];
-      setChecklist(updated);
-      try {
-        localStorage.setItem(`student_improvement_checklist_${sKey}`, JSON.stringify(updated));
-      } catch {}
-    }
-  }, [latestReport?.id, student.id]);
-
-  // Calculate Overall Readiness %: Strictly depends ONLY on the Post-Interview Checklist
-  const totalChecklistCount = checklist.length;
-  const completedChecklistCount = checklist.filter(c => c.isCompleted).length;
-  const overallReadinessScore = totalChecklistCount === 0 
-    ? 0 
-    : Math.round((completedChecklistCount / totalChecklistCount) * 100);
-
-  // Toggle checklist item
-  const handleToggleChecklistItem = (itemId: string) => {
-    const updated = checklist.map(item => 
-      item.id === itemId ? { ...item, isCompleted: !item.isCompleted, completedAt: !item.isCompleted ? new Date().toISOString() : undefined } : item
-    );
-    setChecklist(updated);
-    try {
-      localStorage.setItem(`student_improvement_checklist_${student.id}`, JSON.stringify(updated));
-    } catch {}
-  };
 
   // Filter relevant assignments (elapsed test sessions auto-disappear from active drills)
   const relevantAssignments = (assignments || []).filter((asg: InterviewAssignment) => {
@@ -1388,7 +1241,7 @@ export const StudentDashboard: React.FC = () => {
             </p>
           </div>
 
-          {/* Card 4: Overall Readiness (Strictly dependent on the Post-Interview Checklist) */}
+          {/* Card 4: Overall Readiness (share of the 4-week plan completed) */}
           <div className="p-3.5 bg-neutral-50/80 rounded-2xl border border-neutral-200/80">
             <div className="flex items-center justify-between text-neutral-500 text-xs font-medium mb-1">
               <span className="font-semibold text-neutral-700">Overall Readiness</span>
@@ -1612,116 +1465,20 @@ export const StudentDashboard: React.FC = () => {
       </div>
 
       {/* ========================================================================= */}
-      {/* POST-INTERVIEW ACTIONABLE IMPROVEMENT CHECKLIST */}
-      {/* (Replaces old College Placement Criteria; Controls Overall Readiness %) */}
+      {/* 4-WEEK IMPROVEMENT PLAN (built from the latest interview; drives Overall Readiness %) */}
       {/* ========================================================================= */}
-      <div className="bg-white dark:bg-[#171717] border border-neutral-200/90 dark:border-neutral-800 rounded-2xl overflow-hidden shadow-xs">
-        <div className="p-6 border-b border-neutral-200/80 dark:border-neutral-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-neutral-50/50 dark:bg-[#141414]">
-          <div>
-            <div className="flex items-center space-x-2.5">
-              <h3 className="text-base font-bold tracking-tight text-neutral-900 dark:text-neutral-100">
-                Post-Interview Improvement Checklist
-              </h3>
-              {totalChecklistCount > 0 && (
-                <span className="px-2.5 py-0.5 text-[11px] font-bold bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 rounded-full font-mono">
-                  {completedChecklistCount} of {totalChecklistCount} Targets Met
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-center space-x-3">
-            <span className="text-xs font-semibold text-neutral-600 dark:text-neutral-400">Readiness Score:</span>
-            <span className={`px-3 py-1 rounded-xl text-xs font-bold border ${
-              overallReadinessScore >= 75 
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800/60' 
-                : overallReadinessScore > 0 
-                ? 'bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800/60' 
-                : 'bg-neutral-100 text-neutral-700 border-neutral-300 dark:bg-neutral-900 dark:text-neutral-200 dark:border-neutral-700'
-            }`}>
-              {overallReadinessScore}% {overallReadinessScore === 100 ? '🎉 Placement Ready' : ''}
-            </span>
-          </div>
-        </div>
-
-        {checklist.length === 0 ? (
-          <div className="p-10 text-center text-neutral-400 space-y-2">
-            <Sparkles className="w-8 h-8 text-neutral-300 mx-auto" />
-            <h4 className="text-sm font-semibold text-neutral-800 dark:text-neutral-200">No Improvement Checklist Yet</h4>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 max-w-md mx-auto">
-              Complete a mock interview or assigned practice drill to generate your checklist.
-            </p>
-            <button
-              type="button"
-              onClick={() => {
-                if (typeof document !== 'undefined' && !document.fullscreenElement && document.documentElement.requestFullscreen) {
-                  document.documentElement.requestFullscreen().catch(() => {});
-                }
-                startInterview('MOCK_INTERVIEW');
-              }}
-              className="mt-2 inline-flex items-center space-x-2 px-4 py-2 bg-neutral-900 hover:bg-black text-white rounded-xl text-xs font-semibold transition-all shadow-xs cursor-pointer"
-            >
-              <Mic className="w-3.5 h-3.5" />
-              <span>Take an Interview to Generate Action Plan</span>
-            </button>
-          </div>
-        ) : (
-          <div className="divide-y divide-neutral-100">
-            {checklist.map((item) => (
-              <div 
-                key={item.id}
-                onClick={() => handleToggleChecklistItem(item.id)}
-                className={`p-4 sm:px-6 flex items-center justify-between hover:bg-neutral-50/70 transition-colors cursor-pointer ${
-                  item.isCompleted ? 'bg-neutral-50/40' : ''
-                }`}
-              >
-                <div className="flex items-start space-x-3.5 min-w-0">
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleToggleChecklistItem(item.id);
-                    }}
-                    className={`mt-0.5 w-5 h-5 rounded-md flex items-center justify-center transition-all flex-shrink-0 cursor-pointer ${
-                      item.isCompleted 
-                        ? 'bg-emerald-600 text-white border border-emerald-600' 
-                        : 'border border-neutral-300 hover:border-neutral-400 bg-white'
-                    }`}
-                  >
-                    {item.isCompleted && <Check className="w-3.5 h-3.5" />}
-                  </button>
-
-                  <div className="min-w-0">
-                    <div className="flex items-center space-x-2">
-                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-neutral-100 text-neutral-800 font-mono">
-                        {item.week}
-                      </span>
-                      <p className={`text-xs font-semibold ${item.isCompleted ? 'line-through text-neutral-400' : 'text-neutral-900'}`}>
-                        {item.title}
-                      </p>
-                    </div>
-                    <p className={`text-[11px] mt-0.5 leading-relaxed ${item.isCompleted ? 'line-through text-neutral-400' : 'text-neutral-500'}`}>
-                      {item.description}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center space-x-3 ml-4 flex-shrink-0">
-                  {item.isCompleted ? (
-                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                      <CheckCircle2 className="w-3 h-3 mr-1" /> Completed
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
-                      <Clock className="w-3 h-3 mr-1" /> Action Required
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      <LearningPlanPanel
+        current={learningPlan.current}
+        loading={learningPlan.loading}
+        error={learningPlan.error}
+        rebuilding={learningPlan.rebuilding}
+        readOnly={!isStudentViewer}
+        completed={learningPlan.completed}
+        total={learningPlan.total}
+        onToggle={learningPlan.toggleTask}
+        onRebuild={learningPlan.rebuild}
+        onStartInterview={startMockInterview}
+      />
 
       {/* ========================================================================= */}
       {/* MODAL: LINK CODING HANDLES & OTHER PLATFORMS */}

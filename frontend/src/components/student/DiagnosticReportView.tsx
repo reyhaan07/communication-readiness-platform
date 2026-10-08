@@ -231,6 +231,24 @@ export const DiagnosticReportView: React.FC = () => {
         </div>
       )}
 
+      {latestReport.sessionType === 'MOCK_INTERVIEW' && !isDisqualified && (
+        <div className="bg-neutral-900 text-white rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold">Your 4-week improvement plan is being built from this interview</h3>
+            <p className="text-xs text-neutral-300 mt-1 leading-relaxed">
+              Day-by-day tasks for the questions you lost marks on, the key points you missed, and your pace and
+              filler words — with weekly targets and a checkpoint interview. It appears on your dashboard in about a minute.
+            </p>
+          </div>
+          <button
+            onClick={() => setActiveView('DASHBOARD')}
+            className="shrink-0 inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-white text-neutral-900 text-xs font-semibold hover:bg-neutral-100 cursor-pointer"
+          >
+            <ListChecks className="w-3.5 h-3.5" /> View my 4-week plan
+          </button>
+        </div>
+      )}
+
       {latestReport.turns && latestReport.turns.length > 0 && (
         <div className="bg-white border border-neutral-200/90 rounded-2xl p-6 shadow-xs space-y-3">
           <h3 className="text-sm font-semibold tracking-tight text-neutral-900">Question-by-Question Review</h3>

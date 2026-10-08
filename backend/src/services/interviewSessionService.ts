@@ -290,6 +290,7 @@ export async function completeAttempt(
   scores: AttemptScores,
   goal: string,
   componentScores?: Record<string, unknown>,
+  reportData?: unknown,
 ): Promise<boolean> {
   const { rows: attemptRows } = await db.query<{
     student_id: string; program_id: string; batch_id: string; subdivision_id: string | null; status: string;
@@ -317,11 +318,12 @@ export async function completeAttempt(
       `INSERT INTO performance.assessment_reports
          (attempt_id, student_id, assessment_version, scoring_version,
           technical_score, communication_score, listening_score, overall_score,
-          component_scores, skill_scores)
-       VALUES ($1,$2,1,'v1.0',$3,$4,$5,$6,$7,NULL)
+          component_scores, skill_scores, report_data)
+       VALUES ($1,$2,1,'v1.0',$3,$4,$5,$6,$7,NULL,$8)
        ON CONFLICT (attempt_id) DO UPDATE
          SET technical_score=$3, communication_score=$4,
-             listening_score=$5, overall_score=$6`,
+             listening_score=$5, overall_score=$6,
+             report_data=COALESCE($8, performance.assessment_reports.report_data)`,
       [
         attemptId,
         attempt.student_id,
@@ -334,6 +336,7 @@ export async function completeAttempt(
           COMMUNICATION: scores.communicationScore,
           LISTENING: scores.listeningScore,
         }),
+        reportData === undefined ? null : JSON.stringify(reportData),
       ]
     );
     await client.query(
@@ -398,6 +401,8 @@ export async function concludeLiveInterview(
       TAB_SWITCHES: report.tabSwitches,
       QUESTIONS_ANSWERED: report.questionsAnswered,
     },
+    // The learning-plan agent builds the 4-week plan from this evidence
+    report,
   );
 }
 

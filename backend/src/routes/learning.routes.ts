@@ -187,6 +187,200 @@ learningRouter.get('/plans/:studentId', async (req: AuthRequest, res: Response):
   }
 });
 
+// ── The student's current 4-week plan, built by the agent after each mock interview ──
+
+// A run older than this that never finished is treated as dead, not "building"
+const PLAN_RUN_STALE_MS = 10 * 60 * 1000;
+// Right after an interview the agent run may not exist yet (it is started by an event)
+const PLAN_TRIGGER_GRACE_MS = 2 * 60 * 1000;
+const MAX_PLAN_REBUILDS_PER_HOUR = 5;
+
+interface PlanRow {
+  id: string; plan_data: Record<string, unknown> | null; progress: Record<string, string> | null;
+  source_attempt_id: string | null; version: number | null; created_at: Date; updated_at: Date;
+}
+interface RunRow { id: string; status: string; termination_reason: string | null; created_at: Date }
+
+async function latestPlanRun(studentId: string): Promise<RunRow | null> {
+  const { rows } = await db.query<RunRow>(
+    `SELECT ar.id, ar.status, ar.termination_reason, ar.created_at
+     FROM agent.agent_runs ar
+     JOIN agent.agent_definitions ad ON ad.id = ar.agent_definition_id
+     WHERE ar.student_id = $1 AND ad.name = 'learning_readiness_agent'
+     ORDER BY ar.created_at DESC LIMIT 1`,
+    [studentId]
+  );
+  return rows[0] ?? null;
+}
+
+const isRunActive = (run: RunRow | null): boolean =>
+  !!run && ['QUEUED', 'RUNNING'].includes(run.status) && Date.now() - new Date(run.created_at).getTime() < PLAN_RUN_STALE_MS;
+
+// Every id a student can tick in a plan: day tasks, weekly checkpoints, and (older plans) activities
+function planTaskIds(plan: Record<string, unknown> | null): Set<string> {
+  const ids = new Set<string>();
+  const weeks = Array.isArray(plan?.weeklyPlan) ? (plan!.weeklyPlan as Record<string, unknown>[]) : [];
+  weeks.forEach((week, w) => {
+    for (const day of Array.isArray(week.days) ? (week.days as Record<string, unknown>[]) : []) {
+      for (const task of Array.isArray(day.tasks) ? (day.tasks as Record<string, unknown>[]) : []) {
+        if (typeof task.id === 'string') ids.add(task.id);
+      }
+    }
+    const checkpoint = week.checkpoint as Record<string, unknown> | undefined;
+    if (typeof checkpoint?.id === 'string') ids.add(checkpoint.id);
+    if (!Array.isArray(week.days) && Array.isArray(week.activities)) {
+      (week.activities as unknown[]).forEach((_, i) => ids.add(`w${w + 1}-a${i + 1}`));
+    }
+  });
+  return ids;
+}
+
+learningRouter.get('/plans/:studentId/current', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const studentId = req.params.studentId as string;
+    await assertStudentScope(req, studentId);
+
+    const [{ rows: planRows }, { rows: interviewRows }, run] = await Promise.all([
+      db.query<PlanRow>(
+        `SELECT id, plan_data, progress, source_attempt_id, version, created_at, updated_at
+         FROM performance.learning_plans WHERE student_id = $1
+         ORDER BY created_at DESC LIMIT 1`,
+        [studentId]
+      ),
+      db.query<{ attempt_id: string; created_at: Date }>(
+        `SELECT attempt_id, created_at FROM performance.assessment_reports
+         WHERE student_id = $1 AND report_data IS NOT NULL
+         ORDER BY created_at DESC LIMIT 1`,
+        [studentId]
+      ),
+      latestPlanRun(studentId),
+    ]);
+    const plan = planRows[0] ?? null;
+    const interview = interviewRows[0] ?? null;
+
+    // The plan is current when it was built from (or after) the latest interview
+    const planIsCurrent = !!plan && (!interview
+      || plan.source_attempt_id === interview.attempt_id
+      || new Date(plan.created_at) > new Date(interview.created_at));
+    const runAfterInterview = !!run && !!interview && new Date(run.created_at) >= new Date(interview.created_at);
+
+    let status: 'NO_INTERVIEW' | 'GENERATING' | 'READY' | 'FAILED' | 'MISSING';
+    if (isRunActive(run)) status = 'GENERATING';
+    else if (planIsCurrent) status = 'READY';
+    else if (!interview) status = 'NO_INTERVIEW';
+    else if (runAfterInterview && ['FAILED', 'DEAD'].includes(run!.status)) status = 'FAILED';
+    else if (Date.now() - new Date(interview.created_at).getTime() < PLAN_TRIGGER_GRACE_MS) status = 'GENERATING';
+    else status = 'MISSING';
+
+    sendSuccess(res, {
+      status,
+      plan: plan && {
+        id: plan.id,
+        data: plan.plan_data,
+        progress: plan.progress ?? {},
+        sourceAttemptId: plan.source_attempt_id,
+        version: plan.version,
+        createdAt: plan.created_at,
+        isCurrent: planIsCurrent,
+      },
+      latestInterviewAt: interview?.created_at ?? null,
+      run: run && { id: run.id, status: run.status, reason: run.termination_reason, createdAt: run.created_at },
+    });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+const progressSchema = z.object({
+  taskId: z.string().regex(/^w\d{1,2}-(d\d{1,2}-t\d{1,2}|cp|a\d{1,2})$/),
+  done: z.boolean(),
+});
+
+// Only the student ticks off their own plan; staff can read it
+learningRouter.patch(
+  '/plans/:planId/progress',
+  requireRole('STUDENT'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const parsed = progressSchema.safeParse(req.body);
+      if (!parsed.success) throw new AppError(422, 'Unknown plan task', 'VALIDATION_ERROR');
+      const { taskId, done } = parsed.data;
+
+      const { rows } = await db.query<{ student_id: string; plan_data: Record<string, unknown> | null }>(
+        'SELECT student_id, plan_data FROM performance.learning_plans WHERE id::text = $1',
+        [req.params.planId]
+      );
+      if (rows.length === 0) throw new AppError(404, 'Plan not found', 'NOT_FOUND');
+      await assertStudentScope(req, rows[0].student_id);
+      if (!planTaskIds(rows[0].plan_data).has(taskId)) {
+        throw new AppError(422, 'This task is not part of the plan', 'VALIDATION_ERROR');
+      }
+
+      // One atomic jsonb update, so ticks from two tabs never overwrite each other
+      const { rows: updated } = await db.query<{ progress: Record<string, string> }>(
+        done
+          ? `UPDATE performance.learning_plans
+             SET progress = COALESCE(progress, '{}'::jsonb) || jsonb_build_object($2::text, to_jsonb(now())), updated_at = now()
+             WHERE id::text = $1 RETURNING progress`
+          : `UPDATE performance.learning_plans
+             SET progress = COALESCE(progress, '{}'::jsonb) - $2::text, updated_at = now()
+             WHERE id::text = $1 RETURNING progress`,
+        [req.params.planId, taskId]
+      );
+      sendSuccess(res, { progress: updated[0]?.progress ?? {} });
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
+// Builds a fresh plan from the latest interview (e.g. after a failed build, or for new LLM content)
+learningRouter.post('/plans/:studentId/rebuild', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const studentId = req.params.studentId as string;
+    await assertStudentScope(req, studentId);
+
+    const { rows: interviewRows } = await db.query(
+      `SELECT 1 FROM performance.assessment_reports
+       WHERE student_id = $1 AND report_data IS NOT NULL LIMIT 1`,
+      [studentId]
+    );
+    if (interviewRows.length === 0) {
+      throw new AppError(409, 'Take a mock interview first — the plan is built from it', 'NO_INTERVIEW');
+    }
+    if (isRunActive(await latestPlanRun(studentId))) {
+      throw new AppError(409, 'Your plan is already being built', 'PLAN_IN_PROGRESS');
+    }
+    const { rows: recent } = await db.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM agent.agent_runs ar
+       JOIN agent.agent_definitions ad ON ad.id = ar.agent_definition_id
+       WHERE ar.student_id = $1 AND ad.name = 'learning_readiness_agent'
+         AND ar.created_at > now() - interval '1 hour'`,
+      [studentId]
+    );
+    if (parseInt(recent[0]?.n ?? '0', 10) >= MAX_PLAN_REBUILDS_PER_HOUR) {
+      throw new AppError(429, 'You have rebuilt your plan several times this hour — try again later', 'TOO_MANY_REBUILDS');
+    }
+
+    const resp = await axios.post(
+      `${env.AI_SERVICE_URL}/agent/run`,
+      {
+        student_id: studentId,
+        goal: 'Improve technical skills, communication skills, and interview readiness',
+        triggered_by_user_id: req.user!.id,
+      },
+      { timeout: 10_000, headers: { 'X-Internal-Key': env.AI_INTERNAL_KEY } }
+    );
+    sendSuccess(res, { agentRunId: resp.data.run_id as string }, 202);
+  } catch (err) {
+    if (err && typeof err === 'object' && 'isAxiosError' in err) {
+      sendError(res, new AppError(503, 'The plan service is unavailable — try again shortly', 'AGENT_UNAVAILABLE'));
+      return;
+    }
+    sendError(res, err);
+  }
+});
+
 learningRouter.get('/recommendations/:studentId', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const studentId = req.params.studentId as string;

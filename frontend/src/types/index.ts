@@ -217,6 +217,70 @@ export interface ImprovementChecklistItem {
   completedAt?: string;
 }
 
+// ── Post-interview 4-week plan (built by the learning-plan agent from the interview) ──
+
+export interface PlanTask { id: string; text: string }
+export interface PlanDay { day: number; title: string; minutes: number; tasks: PlanTask[] }
+export interface PlanTarget { metric: string; baseline: string; target: string }
+export interface PlanQuestion { question: string; from?: string; goodAnswerCovers: string[] }
+export interface PlanResource { type: string; title: string; url?: string; documentId?: string; usage?: string }
+
+export interface PlanWeek {
+  week: number;
+  kind: 'topic' | 'delivery' | 'projects' | 'depth' | 'simulation';
+  title: string;
+  focus: string;
+  focusScore: number | null;
+  objective: string;
+  whyThisWeek: string;
+  evidence: string[];
+  targets: PlanTarget[];
+  days: PlanDay[];
+  practiceQuestions: PlanQuestion[];
+  drill: { name: string; steps: string[]; target: string };
+  studyNotes?: { topic: string; learn: string[]; tryThis: string }[];
+  resources: PlanResource[];
+  checkpoint: { id: string; task: string; passIf: string };
+  measurableOutcome: string;
+  estimatedHours: number;
+}
+
+export interface InterviewPlanData {
+  version: 2;
+  headline: string;
+  summary: string;
+  interviewDate: string;
+  baseline: {
+    overall: number; technical: number; communication: number;
+    wpm: number | null; fillers: number; fillersPerAnswer: number; longPauses: number; latencySec: number | null;
+    questionsAnswered: number; questionsPlanned: number;
+  };
+  finalTargets: { metric: string; baseline: number; target: number; unit?: string }[];
+  focusAreas: { name: string; score: number; status: 'STRONG' | 'MODERATE' | 'NEEDS_WORK'; missed: string[] }[];
+  deliveryIssues: { label: string; evidence: string }[];
+  strengths: string[];
+  weeklyPlan: PlanWeek[];
+  totalTasks: number;
+  generation_source: 'LLM' | 'LLM_PARTIAL' | 'EVIDENCE_RULES' | string;
+  generatedAt: string;
+}
+
+export type LearningPlanStatus = 'NO_INTERVIEW' | 'GENERATING' | 'READY' | 'FAILED' | 'MISSING';
+
+export interface CurrentLearningPlan {
+  status: LearningPlanStatus;
+  plan: {
+    id: string;
+    // Older agent plans (version 1) have weeks with activities instead of days
+    data: InterviewPlanData | Record<string, any> | null;
+    progress: Record<string, string>;
+    createdAt: string;
+    isCurrent: boolean;
+  } | null;
+  latestInterviewAt: string | null;
+  run: { id: string; status: string; reason: string | null; createdAt: string } | null;
+}
+
 export interface StudentProfile {
   id: string;
   name: string;
