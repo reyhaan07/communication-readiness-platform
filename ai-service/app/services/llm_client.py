@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from app.services.providers import BaseProvider, MockProvider, OpenAICompatibleProvider
+from app.services.llm_priority import yield_to_interactive
 
 # ── Provider presets ───────────────────────────────────────────────────────────
 
@@ -77,6 +78,8 @@ class LLMClient:
         return type(self._provider).__name__
 
     def _call_json(self, prompt: str, max_tokens: int | None = None, temperature: float = 0.7) -> dict[str, Any]:
+        # Background work (plans) lets students waiting in a live interview go first
+        yield_to_interactive()
         raw = self._provider.chat_complete(
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
@@ -111,6 +114,7 @@ class LLMClient:
         tools: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Run one agent-loop step: return next action (tool_call or final_answer)."""
+        yield_to_interactive()
         return self._provider.chat_complete_with_tools(messages, tools)
 
 

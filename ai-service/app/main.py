@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.services.llm_priority import interactive
 from app.routers.interview import router as interview_router
 from app.routers.learning import router as learning_router
 from app.routers.agent import router as agent_router
@@ -19,6 +20,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+
+@app.middleware("http")
+async def interactive_llm_priority(request, call_next):
+    # A student is waiting on every /ai/* call (next question, answer scoring, resume
+    # reading); background agent work yields the LLM quota to these requests.
+    if request.url.path.startswith("/ai/"):
+        with interactive():
+            return await call_next(request)
+    return await call_next(request)
+
 
 app.include_router(interview_router)
 app.include_router(learning_router)
