@@ -52,3 +52,6 @@ ROADMAP.md
 
 # Personal files kept out of the repository (e.g. test resumes)
 /*.pdf
+
+# Local-only documents (account lists etc.)
+/private/

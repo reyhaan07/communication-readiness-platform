@@ -15,7 +15,6 @@ import {
   Sparkles,
   ArrowLeft,
   Clock,
-  RefreshCw,
   FileText,
   CheckCircle2,
   ArrowRight
@@ -131,7 +130,8 @@ export const ListeningRoom: React.FC = () => {
     requestExitAssessment
   } = useApp();
 
-  const [passages, setPassages] = useState<DynamicPassage[]>(() => generateResumeListeningPassages(student));
+  // Fixed set of scenarios for the session
+  const [passages] = useState<DynamicPassage[]>(() => generateResumeListeningPassages(student));
   const [selectedPassageIndex, setSelectedPassageIndex] = useState(0);
   const [sessionId] = useState(() => `lis_${Date.now()}`);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -191,18 +191,6 @@ export const ListeningRoom: React.FC = () => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const handleRegeneratePassages = () => {
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    setIsPlaying(false);
-    stopRecording();
-    const fresh = generateResumeListeningPassages(student);
-    setPassages(fresh);
-    setSelectedPassageIndex(0);
-    setCurrentQuestionIndex(0);
-    setCurrentAnswer("");
-    setReplaysUsed(0);
   };
 
   useEffect(() => {
@@ -646,18 +634,7 @@ export const ListeningRoom: React.FC = () => {
             <h3 className="text-base font-semibold text-neutral-900">{currentPassage.title}</h3>
           </div>
           
-          <div className="flex items-center space-x-3">
-            <button
-              type="button"
-              onClick={handleRegeneratePassages}
-              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-white hover:bg-neutral-50 text-neutral-700 border border-neutral-300 rounded-xl text-xs font-medium transition-colors shadow-2xs cursor-pointer"
-              title="Generate fresh technical briefing from your resume"
-            >
-              <RefreshCw className="w-3 h-3 text-neutral-500" />
-              <span>Regenerate Scenario</span>
-            </button>
-            <span className="text-xs font-medium text-neutral-500 font-mono">Duration: {currentPassage.durationSeconds}s</span>
-          </div>
+          <span className="text-xs font-medium text-neutral-500 font-mono">Duration: {currentPassage.durationSeconds}s</span>
         </div>
 
         <div className="bg-neutral-50 border border-neutral-200/80 rounded-xl p-5 flex flex-col items-center justify-center space-y-4">
