@@ -73,6 +73,7 @@ const MainContent: React.FC = () => {
     case 'PLATFORM_OWNER':
       return <PlatformOwnerPortal />;
     case 'SUPER_ADMIN':
+    case 'COLLEGE_ADMIN': // the Super Admin of their own college
       return <SuperAdminPortal />;
     case 'DEPARTMENT_ADMIN':
       return <DepartmentAdminPortal />;
@@ -86,6 +87,7 @@ const MainContent: React.FC = () => {
     case 'PLACEMENT_COORDINATOR':
       return <PlacementCoordinatorPortal />;
     case 'FACULTY_MENTOR':
+    case 'TRAINER': // works with assigned students like a mentor
       return <FacultyMentorPortal />;
     default:
       return <StudentDashboard />;

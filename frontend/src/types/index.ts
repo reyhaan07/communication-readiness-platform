@@ -6,6 +6,8 @@ export type UserRole =
   | 'PROGRAM_ADMIN'
   | 'FACULTY_MENTOR'
   | 'PLACEMENT_COORDINATOR'
+  | 'COLLEGE_ADMIN'
+  | 'TRAINER'
   | 'STUDENT';
 
 export type StudentTrack = string;

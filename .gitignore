@@ -58,3 +58,8 @@ ROADMAP.md
 
 # Teammate's project copy (kept locally for comparison; contains his server settings)
 /crp-production-main/
+
+# Spreadsheets with student data (seed files) stay out of git
+*.xlsx
+*.xls
+*.csv
