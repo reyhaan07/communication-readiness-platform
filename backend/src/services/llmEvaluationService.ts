@@ -56,7 +56,12 @@ export interface DeliveryMetrics {
   responseLatencySec?: number | null; // question finished → first words
 }
 
-const AI_TIMEOUT_MS = 60_000;
+// Per-call limits keep a turn moving when many interviews share the LLM quota: scoring
+// gets a generous first try and a shorter retry; a slow next question falls back to a
+// prepared one instead of keeping the student waiting.
+const EVALUATE_TIMEOUT_MS = 50_000;
+const EVALUATE_RETRY_TIMEOUT_MS = 30_000;
+const QUESTION_TIMEOUT_MS = 30_000;
 const MAX_CLARIFICATIONS_PER_QUESTION = 2;
 const MAX_CONSECUTIVE_AI_FAILURES = 3;
 
@@ -125,11 +130,11 @@ async function evaluateWithRetry(meta: AudioStartMeta, transcript: string, keyPo
     expected_points: keyPoints,
   };
   try {
-    return (await axios.post<TurnEvaluation>(`${env.AI_SERVICE_URL}/ai/evaluate-turn`, request, { timeout: AI_TIMEOUT_MS })).data;
+    return (await axios.post<TurnEvaluation>(`${env.AI_SERVICE_URL}/ai/evaluate-turn`, request, { timeout: EVALUATE_TIMEOUT_MS })).data;
   } catch (firstErr) {
     console.warn('[interview] evaluate-turn failed, retrying once:', (firstErr as Error).message);
     await new Promise((resolve) => setTimeout(resolve, 800));
-    return (await axios.post<TurnEvaluation>(`${env.AI_SERVICE_URL}/ai/evaluate-turn`, request, { timeout: AI_TIMEOUT_MS })).data;
+    return (await axios.post<TurnEvaluation>(`${env.AI_SERVICE_URL}/ai/evaluate-turn`, request, { timeout: EVALUATE_RETRY_TIMEOUT_MS })).data;
   }
 }
 
@@ -173,7 +178,7 @@ async function generateNextQuestion(
           feedback: [t.feedback, t.weaknesses && `Missing: ${t.weaknesses}`].filter(Boolean).join(' '),
         })),
       },
-      { timeout: AI_TIMEOUT_MS },
+      { timeout: QUESTION_TIMEOUT_MS },
     );
     const text = data?.question_text?.trim();
     const asked = new Set(turns.map((t) => t.question.trim().toLowerCase()));
