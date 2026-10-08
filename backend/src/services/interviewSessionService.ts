@@ -16,6 +16,7 @@ import { Events, AttemptCompletedPayload } from '../shared/events/events';
 import { sessionContextService, InterviewState, InterviewResume } from './sessionContextService';
 import type { InterviewReport } from './interviewReport';
 import { getCoins, spendCoin, refundCoin } from './coinService';
+import { getCurrentResume } from './resumeService';
 
 export const FIRST_QUESTION =
   "Tell me about yourself. Walk me through your background, the key skills you've built, and what you've been working on most recently.";
@@ -114,38 +115,37 @@ export async function createAttemptAndSession(
 
 // ── Start a live (voice) interview for the logged-in student ─────────────────
 
-// Resume details sent by the client (parsed in the browser) or stored in org.resumes.
+// Resume details a client may still send with the start request. They are ignored:
+// the interview uses only the resume the server read and parsed itself (org.resumes),
+// so questions never rest on skills or projects the student did not write.
 export interface ResumeInput {
   skills?: string[];
   projects?: { title: string; techStack?: string[]; description?: string }[];
 }
 
+const RESUME_EXCERPT_CHARS = 3000;
+
 const cleanList = (values: unknown[] | undefined, max: number) =>
   (values ?? []).filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
     .map((v) => v.trim().slice(0, 80)).slice(0, max);
 
-async function loadResume(studentId: string, name: string, provided?: ResumeInput): Promise<InterviewResume> {
-  let source = provided;
-  if (!source?.skills?.length && !source?.projects?.length) {
-    // Fall back to the parsed data of the student's current uploaded resume, if any
-    const { rows } = await db.query<{ parsed_data: ResumeInput | null }>(
-      'SELECT parsed_data FROM org.resumes WHERE student_id = $1 AND is_current = true',
-      [studentId]
-    );
-    source = rows[0]?.parsed_data ?? undefined;
-  }
+async function loadResume(studentId: string, name: string): Promise<InterviewResume> {
+  const current = await getCurrentResume(studentId);
+  if (!current) return { name, skills: [], projects: [] };
+  const { skills, projects } = current.view;
   return {
     name,
-    skills: cleanList(source?.skills, 20),
-    projects: (source?.projects ?? []).slice(0, 5).map((p) => ({
-      title: String(p.title ?? '').slice(0, 120),
+    skills: cleanList([...skills.languages, ...skills.frameworks, ...skills.databases, ...skills.tools], 20),
+    projects: projects.slice(0, 6).map((p) => ({
+      title: p.title.slice(0, 120),
       tech_stack: cleanList(p.techStack, 10),
-      description: String(p.description ?? '').slice(0, 400),
+      description: p.description.slice(0, 400),
     })).filter((p) => p.title),
+    text: current.text.slice(0, RESUME_EXCERPT_CHARS),
   };
 }
 
-export async function startLiveInterview(userId: string, resumeInput?: ResumeInput): Promise<{
+export async function startLiveInterview(userId: string, _resumeInput?: ResumeInput): Promise<{
   sessionId: string;
   attemptId: string;
   maxTurns: number;
@@ -175,7 +175,7 @@ export async function startLiveInterview(userId: string, resumeInput?: ResumeInp
     throw err;
   }
   const maxTurns = env.MAX_QUESTIONS_PER_SESSION;
-  const resume = await loadResume(student.id, student.name, resumeInput)
+  const resume = await loadResume(student.id, student.name)
     .catch(() => ({ name: student.name, skills: [], projects: [] }) as InterviewResume);
 
   const initialState: InterviewState = {
@@ -205,6 +205,9 @@ export async function startLiveInterview(userId: string, resumeInput?: ResumeInp
     consecutive_ai_failures: 0,
     tab_switches: 0,
     fullscreen_exits: 0,
+    resume_topics_asked: [],
+    follow_ups_in_a_row: 0,
+    current_question_source: 'introduction',
   };
 
   try {

@@ -178,7 +178,7 @@ export const ResumeUploadModal: React.FC<ResumeUploadModalProps> = ({ onClose })
                       Click to choose your resume file or drag & drop here
                     </p>
                     <p className="text-[11px] text-neutral-400 mt-1">
-                      Supports PDF, TXT, DOCX (Max 10MB)
+                      PDF, DOCX or TXT, up to 5 MB
                     </p>
 
                     {isProcessing && (

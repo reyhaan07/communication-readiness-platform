@@ -27,6 +27,40 @@ class QuestionGenerationRequest(BaseModel):
     previous_turns: list[PreviousTurn] = Field(default_factory=list)
     difficulty: str = "EASY"
     domain: str | None = None  # PEP domain, if applicable
+    # Excerpt of the resume's own text (experience, internships, achievements)
+    resume_text: str = ""
+    # What the next question builds on, chosen by the backend:
+    #   "resume_topic" — the item in resume_topic;  "follow_up" — the most recent answer
+    focus: str = "follow_up"
+    resume_topic: str = ""
+
+
+# ── Resume parsing ─────────────────────────────────────────────────────────────
+
+class ResumeParseRequest(BaseModel):
+    file_name: str = ""
+    content_base64: str | None = None  # the uploaded file
+    text: str | None = None            # or pasted resume text
+
+
+class ResumeSkills(BaseModel):
+    languages: list[str] = Field(default_factory=list)
+    frameworks: list[str] = Field(default_factory=list)
+    databases: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+
+
+class ResumeProject(BaseModel):
+    title: str
+    tech_stack: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class ResumeParseResponse(BaseModel):
+    text: str
+    summary: str = ""
+    skills: ResumeSkills = Field(default_factory=ResumeSkills)
+    projects: list[ResumeProject] = Field(default_factory=list)
 
 
 class GeneratedQuestionResponse(BaseModel):

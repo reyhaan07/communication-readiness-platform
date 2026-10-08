@@ -14,6 +14,7 @@ import { requireRole, requireStudentSelfOrStaff } from '../middleware/authorize'
 import { env } from '../config/env';
 import { STUDENT_SUMMARY_SELECT } from '../services/studentDirectory';
 import { assertStudentAccess } from '../shared/auth/studentScope';
+import { getCurrentResume, parseResume, saveResumeVersion } from '../services/resumeService';
 
 export const studentRouter = Router();
 
@@ -83,7 +84,8 @@ studentRouter.get(
         throw new AppError(404, 'Student not found', 'NOT_FOUND');
       }
 
-      sendSuccess(res, { student: rows[0] });
+      const resume = await getCurrentResume(rows[0].id);
+      sendSuccess(res, { student: { ...rows[0], resume: resume?.view ?? null } });
     } catch (err) {
       sendError(res, err);
     }
@@ -103,7 +105,8 @@ studentRouter.get(
       // Students: own record only; mentors: assigned students only
       await assertStudentAccess(req.user!, studentId);
 
-      sendSuccess(res, { student: rows[0] });
+      const resume = await getCurrentResume(studentId);
+      sendSuccess(res, { student: { ...rows[0], resume: resume?.view ?? null } });
     } catch (err) {
       sendError(res, err);
     }
@@ -167,64 +170,80 @@ studentRouter.patch(
 );
 
 // ── PATCH /api/students/:studentId/resume ─────────────────────────────────────
+// Stores the file and reads it: the extracted text, skills and projects ground the
+// mock interview's questions. Only facts written in the resume are kept.
+
+const RESUME_TYPES: Record<string, { ext: string; mime: string }> = {
+  '.pdf': { ext: 'pdf', mime: 'application/pdf' },
+  '.docx': { ext: 'docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+  '.txt': { ext: 'txt', mime: 'text/plain' },
+};
+
+async function assertOwnStudentRecord(studentId: string, userId: string): Promise<void> {
+  if (!UUID_RE.test(studentId)) throw new AppError(404, 'Student not found', 'NOT_FOUND');
+  const { rows } = await db.query('SELECT user_id FROM org.students WHERE id = $1', [studentId]);
+  if (rows.length === 0) throw new AppError(404, 'Student not found', 'NOT_FOUND');
+  // Only the student themselves may change their resume
+  if (rows[0].user_id !== userId) throw new AppError(403, 'Access denied', 'FORBIDDEN');
+}
 
 studentRouter.patch(
   '/:studentId/resume',
   upload.single('resume'),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const { studentId } = req.params;
-      const user = req.user!;
-
-      // Only the student themselves may upload their resume
-      const { rows: existing } = await db.query(
-        'SELECT id, user_id FROM org.students WHERE id = $1',
-        [studentId]
-      );
-      if (existing.length === 0) throw new AppError(404, 'Student not found', 'NOT_FOUND');
-      if (existing[0].user_id !== user.id) {
-        throw new AppError(403, 'Access denied', 'FORBIDDEN');
-      }
+      const studentId = req.params.studentId as string;
+      await assertOwnStudentRecord(studentId, req.user!.id);
 
       if (!req.file) throw new AppError(422, 'Resume file required', 'FILE_REQUIRED');
-      if (req.file.mimetype !== 'application/pdf') {
-        throw new AppError(422, 'Only PDF files are accepted', 'INVALID_FILE_TYPE');
+      const extension = (req.file.originalname.match(/\.[a-z0-9]+$/i)?.[0] ?? '').toLowerCase();
+      const type = RESUME_TYPES[extension];
+      if (!type) {
+        throw new AppError(422, 'Upload a PDF, DOCX or TXT file, or paste your resume text.', 'INVALID_FILE_TYPE');
       }
 
-      const filename = `resumes/${randomUUID()}.pdf`;
-      const resumeUrl = await storage.upload(req.file.buffer, filename, 'application/pdf');
+      // Read it first: an unreadable file (e.g. a scanned image) is rejected with a clear reason
+      const parsed = await parseResume({ fileName: req.file.originalname, buffer: req.file.buffer });
 
-      // org.resumes keeps every version; the new upload becomes current and any
-      // earlier mentor sign-off no longer applies to it.
-      const client = await db.connect();
-      let version: number;
-      try {
-        await client.query('BEGIN');
-        await client.query(
-          'UPDATE org.resumes SET is_current = false, updated_at = now() WHERE student_id = $1 AND is_current = true',
-          [studentId]
-        );
-        const { rows } = await client.query<{ version: number }>(
-          `INSERT INTO org.resumes (student_id, version, object_key, file_name, is_current)
-           VALUES ($1, COALESCE((SELECT MAX(version) FROM org.resumes WHERE student_id = $1), 0) + 1, $2, $3, true)
-           RETURNING version`,
-          [studentId, resumeUrl, req.file.originalname]
-        );
-        version = rows[0].version;
-        await client.query(
-          `UPDATE placement.mentor_verifications SET status = 'PENDING', verified_at = NULL, updated_at = now()
-           WHERE student_id = $1 AND verification_type = 'PROFILE'`,
-          [studentId]
-        );
-        await client.query('COMMIT');
-      } catch (txErr) {
-        await client.query('ROLLBACK');
-        throw txErr;
-      } finally {
-        client.release();
+      const resumeUrl = await storage.upload(req.file.buffer, `resumes/${randomUUID()}.${type.ext}`, type.mime);
+      const version = await saveResumeVersion(studentId, {
+        objectKey: resumeUrl,
+        fileName: req.file.originalname,
+        text: parsed.text,
+        data: parsed.data,
+      });
+      const current = await getCurrentResume(studentId);
+
+      sendSuccess(res, { resumeUrl, fileName: req.file.originalname, version, resume: current?.view ?? null });
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
+// ── POST /api/students/:studentId/resume/text ─────────────────────────────────
+
+const resumeTextSchema = z.object({ text: z.string().trim().min(50).max(30_000) });
+
+studentRouter.post(
+  '/:studentId/resume/text',
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const studentId = req.params.studentId as string;
+      await assertOwnStudentRecord(studentId, req.user!.id);
+      const body = resumeTextSchema.safeParse(req.body);
+      if (!body.success) {
+        throw new AppError(422, 'Paste at least 50 characters of your resume.', 'VALIDATION_ERROR');
       }
-
-      sendSuccess(res, { resumeUrl, fileName: req.file.originalname, version });
+      const parsed = await parseResume({ fileName: 'Pasted resume', text: body.data.text });
+      const version = await saveResumeVersion(studentId, {
+        objectKey: null,
+        fileName: 'Pasted resume',
+        text: parsed.text,
+        data: parsed.data,
+      });
+      const current = await getCurrentResume(studentId);
+      sendSuccess(res, { version, resume: current?.view ?? null }, 201);
     } catch (err) {
       sendError(res, err);
     }

@@ -183,6 +183,8 @@ export interface DiagnosticReport {
     feedback: string;
     pointsCovered: string[];
     pointsMissed: string[];
+    // What the question was built on: the resume, a follow-up on the previous answer, ...
+    questionSource?: 'introduction' | 'resume' | 'follow_up' | 'fallback';
   }[];
 }
 

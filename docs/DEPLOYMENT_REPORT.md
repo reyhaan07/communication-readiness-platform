@@ -207,7 +207,7 @@ dc logs -f --tail=100 backend ai-service
 **Deploy a code update** (on the development machine, in the project folder, using Git Bash)
 ```bash
 tar --exclude=node_modules --exclude=dist --exclude=.venv --exclude=.git \
-    --exclude='.env*' --exclude=uploads --exclude=__pycache__ --exclude='*.zip' -czf - . \
+    --exclude='.env*' --exclude=uploads --exclude=__pycache__ --exclude='*.zip' --exclude='*.pdf' -czf - . \
   | ssh -i pcp-production-key.pem ubuntu@13.235.229.218 'tar -xzf - -C /opt/pcp'
 ssh -i pcp-production-key.pem ubuntu@13.235.229.218 'cd /opt/pcp && bash deploy/server-deploy.sh'
 ```

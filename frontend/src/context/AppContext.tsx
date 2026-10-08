@@ -1681,33 +1681,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const uploadResumeData = async (payload: FormData | { resumeText: string; fileName?: string } | ParsedResume): Promise<ParsedResume> => {
-    let parsed: ParsedResume;
-    try {
-      parsed = await api.student.uploadResume(student.id || 'stu-21cs1084', payload);
-    } catch {
-      if ('skills' in payload && 'projects' in payload) {
-        parsed = payload as ParsedResume;
-      } else {
-        parsed = {
-          fileName: 'Uploaded_Resume.pdf',
-          parsedAt: new Date().toISOString().split('T')[0],
-          summary: 'Full-Stack Developer with hands-on experience in Java, Spring Boot, React, and scalable cloud applications.',
-          skills: {
-            languages: ['Java', 'TypeScript', 'SQL'],
-            frameworks: ['Spring Boot', 'React', 'Tailwind CSS'],
-            databases: ['PostgreSQL', 'Redis'],
-            tools: ['Git', 'Docker']
-          },
-          projects: [
-            {
-              title: 'College Placement Readiness Engine',
-              description: 'Real-time diagnostic assessment platform',
-              techStack: ['React', 'Node.js', 'PostgreSQL']
-            }
-          ]
-        };
-      }
-    }
+    // Errors reach the upload dialog; a resume is never filled in with guessed content
+    const parsed = await api.student.uploadResume(student.id, payload);
     setStudent(prev => ({ ...prev, resume: parsed }));
     return parsed;
   };

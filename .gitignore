@@ -49,3 +49,6 @@ ROADMAP.md
 
 # Local archives
 *.zip
+
+# Personal files kept out of the repository (e.g. test resumes)
+/*.pdf

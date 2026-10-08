@@ -31,7 +31,7 @@ export interface InterviewReport {
   averageResponseLatencySec: number | null;
   scoringMethod: string[];
   turns: Pick<TurnResult, 'turn' | 'question' | 'difficulty' | 'technicalScore' | 'communicationScore' | 'overallScore'
-    | 'wpm' | 'fillerCount' | 'pauseCount' | 'feedback' | 'pointsCovered' | 'pointsMissed'>[];
+    | 'wpm' | 'fillerCount' | 'pauseCount' | 'feedback' | 'pointsCovered' | 'pointsMissed' | 'questionSource'>[];
 }
 
 // Harder questions count more towards the technical average; the self-introduction
@@ -174,6 +174,7 @@ export function buildInterviewReport(input: {
       technicalScore: t.technicalScore, communicationScore: t.communicationScore, overallScore: t.overallScore,
       wpm: t.wpm, fillerCount: t.fillerCount, pauseCount: t.pauseCount ?? null, feedback: t.feedback,
       pointsCovered: t.pointsCovered ?? [], pointsMissed: t.pointsMissed ?? [],
+      questionSource: t.questionSource,
     })),
   };
 }

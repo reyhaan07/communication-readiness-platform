@@ -96,6 +96,10 @@ class LLMClient:
     def evaluate_listening(self, prompt: str) -> dict[str, Any]:
         return self._call_json(prompt, temperature=0.1)
 
+    # Extraction must stick to what the resume says, so no creative sampling
+    def parse_resume(self, prompt: str) -> dict[str, Any]:
+        return self._call_json(prompt, temperature=0.1)
+
     def chat_complete_with_tools(
         self,
         messages: list[dict[str, Any]],

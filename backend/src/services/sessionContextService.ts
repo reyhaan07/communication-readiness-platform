@@ -50,13 +50,20 @@ export interface InterviewState {
   tab_switches?: number;
   fullscreen_exits?: number;
   last_proctor_event_at?: number;
+  // Resume coverage: items already asked about, and follow-ups since the last new item
+  resume_topics_asked?: string[];
+  follow_ups_in_a_row?: number;
+  current_question_source?: QuestionSource;
 }
+
+export type QuestionSource = 'introduction' | 'resume' | 'follow_up' | 'fallback';
 
 // What the interviewer knows about the candidate, used to ground questions in their resume.
 export interface InterviewResume {
   name: string;
   skills: string[];
   projects: { title: string; tech_stack: string[]; description: string }[];
+  text?: string; // excerpt of the resume's own text
 }
 
 // One evaluated answer. Scores are 0-100; wpm is null when speaking time was not measured.
@@ -87,6 +94,7 @@ export interface TurnResult {
   feedback: string;
   strengths: string;
   weaknesses: string;
+  questionSource?: QuestionSource;  // what the question was built on
   ts: string;
 }
 

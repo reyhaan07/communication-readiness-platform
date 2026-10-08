@@ -2099,93 +2099,51 @@ class ApiClient {
       }
     },
 
+    // The server reads the resume (PDF, DOCX, TXT or pasted text) and keeps only what it
+    // actually says. Nothing is guessed here: an unreadable resume is an error the student sees.
     uploadResume: async (
       studentId: string,
       payload: FormData | { resumeText: string; fileName?: string } | ParsedResume
     ): Promise<ParsedResume> => {
-      try {
-        // If payload is FormData, upload to backend
-        if (payload instanceof FormData) {
-          const headers: HeadersInit = {};
-          if (this.token) {
-            headers['Authorization'] = `Bearer ${this.token}`;
-          }
-
-          const response = await fetch(`${this.baseURL}/students/${studentId}/resume`, {
-            method: 'PATCH',
-            headers,
-            body: payload, // Don't set Content-Type, let browser set multipart boundary
-          });
-
-          if (!response.ok) {
-            throw new Error(`Resume upload failed: ${response.statusText}`);
-          }
-
-          const data = await response.json();
-
-          // Refresh profile to get updated resume
-          const updated = await this.student.getProfile(studentId);
-          return updated.resume || {
-            fileName: 'Uploaded Resume',
-            parsedAt: new Date().toISOString().split('T')[0],
-            summary: 'Resume uploaded successfully',
-            skills: { languages: [], frameworks: [], databases: [], tools: [] },
-            projects: []
-          };
+      let resume: ParsedResume | null;
+      if (payload instanceof FormData) {
+        const headers: HeadersInit = {};
+        if (this.token) {
+          headers['Authorization'] = `Bearer ${this.token}`;
         }
-
-        // Otherwise, use client-side parsing (fallback/mock behavior)
-        let parsed: ParsedResume;
-
-        if ('skills' in payload && 'projects' in payload) {
-          parsed = payload as ParsedResume;
-        } else {
-          const rawText = (payload as any)?.resumeText || '';
-          const fileName = (payload as any)?.fileName || 'Uploaded_Resume.pdf';
-
-          const extractedLanguages: string[] = [];
-          const langMap = ['Python', 'Java', 'TypeScript', 'JavaScript', 'C++', 'Go', 'Rust', 'SQL', 'C#', 'PHP'];
-          langMap.forEach(l => {
-            if (new RegExp(`\\b${l}\\b`, 'i').test(rawText)) extractedLanguages.push(l);
-          });
-
-          const extractedFrameworks: string[] = [];
-          const frameMap = ['React', 'Node.js', 'Spring Boot', 'FastAPI', 'Express', 'Django', 'Docker', 'Kubernetes', 'Tailwind', 'Next.js', 'PyTorch', 'TensorFlow'];
-          frameMap.forEach(f => {
-            if (new RegExp(`\\b${f.replace('.', '\\.')}\\b`, 'i').test(rawText)) extractedFrameworks.push(f);
-          });
-
-          parsed = {
-            fileName,
-            parsedAt: new Date().toISOString().split('T')[0],
-            summary: extractedLanguages.length > 0
-              ? `Specialized candidate with expertise in ${extractedLanguages.join(', ')} and ${extractedFrameworks.slice(0, 3).join(', ')}.`
-              : 'Software Engineering candidate with hands-on full-stack development experience.',
-            skills: {
-              languages: extractedLanguages.length > 0 ? extractedLanguages : ['Java', 'TypeScript', 'SQL', 'Python'],
-              frameworks: extractedFrameworks.length > 0 ? extractedFrameworks : ['Spring Boot', 'React', 'Tailwind CSS', 'Docker'],
-              databases: ['PostgreSQL', 'Redis'],
-              tools: ['Git', 'Docker', 'Kafka']
-            },
-            projects: [
-              {
-                title: rawText.includes('Platform') ? 'Communication & Placement Engine' : 'High-Throughput Distributed Microservice',
-                description: 'Designed and deployed low-latency transactional workflows with automated telemetry and resilience testing.',
-                techStack: extractedLanguages.concat(extractedFrameworks).slice(0, 4)
-              }
-            ]
-          };
+        const response = await fetch(`${this.baseURL}/students/${studentId}/resume`, {
+          method: 'PATCH',
+          headers,
+          body: payload, // Don't set Content-Type, let the browser set the multipart boundary
+        });
+        const body = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(body?.message
+            || (response.status === 413 ? 'The file is too large. Upload a resume under 5 MB.' : `Resume upload failed (${response.status})`));
         }
-
-        const current = await this.student.getProfile(studentId);
-        current.resume = parsed;
-        this.setStorage(`student_profile_${studentId}`, current);
-        this.setStorage('student_profile', current);
-        return parsed;
-      } catch (error) {
-        console.error('Failed to upload resume:', error);
-        throw error;
+        resume = body?.data?.resume ?? null;
+      } else if ('resumeText' in payload) {
+        const data = await this.fetchAPI<{ resume: ParsedResume | null }>(`/students/${studentId}/resume/text`, {
+          method: 'POST',
+          body: JSON.stringify({ text: payload.resumeText }),
+        });
+        resume = data.resume;
+      } else {
+        resume = payload;
       }
+      if (!resume) {
+        throw new Error('No text could be read from this resume. Try pasting the resume text instead.');
+      }
+
+      try {
+        const cached = this.getStorage<StudentProfile | null>(`student_profile_${studentId}`, null);
+        if (cached) {
+          this.setStorage(`student_profile_${studentId}`, { ...cached, resume });
+        }
+      } catch {
+        // the cache is a convenience only
+      }
+      return resume;
     }
   };
 

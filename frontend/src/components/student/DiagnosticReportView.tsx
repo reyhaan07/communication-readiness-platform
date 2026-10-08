@@ -243,6 +243,16 @@ export const DiagnosticReportView: React.FC = () => {
                     {turn.difficulty} · {turn.overallScore}/100
                   </span>
                 </div>
+                {turn.questionSource && turn.questionSource !== 'fallback' && (
+                  <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                    turn.questionSource === 'resume'
+                      ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                      : 'bg-neutral-100 text-neutral-600 border border-neutral-200'
+                  }`}>
+                    {turn.questionSource === 'resume' ? 'From your resume'
+                      : turn.questionSource === 'follow_up' ? 'Follow-up on your answer' : 'Introduction'}
+                  </span>
+                )}
                 <p className="text-[10px] text-neutral-500 font-mono">
                   Technical {turn.technicalScore} · Communication {turn.communicationScore}
                   {turn.wpm !== null && ` · ${turn.wpm} WPM`} · {turn.fillerCount} filler(s)
