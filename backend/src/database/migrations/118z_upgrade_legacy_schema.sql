@@ -255,18 +255,25 @@ END $$;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_schema = 'org' AND table_name = 'students' AND column_name = 'resume_verified')
-     AND NOT EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_schema = 'identity' AND table_name = 'users' AND column_name = 'institution_id') THEN
-    ALTER TABLE identity.users ADD COLUMN institution_id UUID REFERENCES org.institutions(id);
-    ALTER TABLE identity.users ADD COLUMN department_id  UUID REFERENCES org.departments(id);
-    ALTER TABLE identity.users ADD COLUMN first_name     VARCHAR(100);
-    ALTER TABLE identity.users ADD COLUMN last_name      VARCHAR(100);
-    ALTER TABLE identity.users ADD COLUMN is_active      BOOLEAN NOT NULL DEFAULT true;
-
-    UPDATE identity.users
-    SET first_name = split_part(name, ' ', 1),
-        last_name  = NULLIF(btrim(substr(name, length(split_part(name, ' ', 1)) + 1)), '');
+             WHERE table_schema = 'org' AND table_name = 'students' AND column_name = 'resume_verified') THEN
+    -- Column by column: a partial upgrade of the earlier version may already have added some
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'identity' AND table_name = 'users' AND column_name = 'institution_id') THEN
+      ALTER TABLE identity.users ADD COLUMN institution_id UUID REFERENCES org.institutions(id);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'identity' AND table_name = 'users' AND column_name = 'department_id') THEN
+      ALTER TABLE identity.users ADD COLUMN department_id UUID REFERENCES org.departments(id);
+    END IF;
+    ALTER TABLE identity.users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'identity' AND table_name = 'users' AND column_name = 'first_name') THEN
+      ALTER TABLE identity.users ADD COLUMN first_name VARCHAR(100);
+      ALTER TABLE identity.users ADD COLUMN IF NOT EXISTS last_name VARCHAR(100);
+      UPDATE identity.users
+      SET first_name = split_part(name, ' ', 1),
+          last_name  = NULLIF(btrim(substr(name, length(split_part(name, ' ', 1)) + 1)), '');
+    END IF;
 
     -- Students: their program's institution
     UPDATE identity.users u SET institution_id = p.institution_id

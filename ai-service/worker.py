@@ -8,14 +8,25 @@ concurrent workers can be distinguished in the same log stream.
 from __future__ import annotations
 
 import os
+import re
+import socket
 import time
+import uuid
 
 from redis import Redis
 from rq import Worker
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _QUEUES    = ["agent_jobs"]
-_WORKER_ID = os.environ.get("WORKER_ID", f"worker-pid{os.getpid()}")
+# Inside a container the PID is always 1, so a PID-based name collides with the
+# previous container's registration (still in Redis for a few minutes after a
+# restart) and RQ refuses to start. The hostname differs per container.
+_WORKER_ID = os.environ.get("WORKER_ID", f"worker-{socket.gethostname()}-{uuid.uuid4().hex[:6]}")
+
+
+def _redacted(url: str) -> str:
+    """The Redis URL without its password, for logs."""
+    return re.sub(r"//([^:@/]*):[^@]*@", r"//\1:****@", url)
 
 
 class IdentifiedWorker(Worker):
@@ -62,7 +73,7 @@ if __name__ == "__main__":
     print(
         f"[worker {_WORKER_ID}] starting"
         f" queues={_QUEUES}"
-        f" redis={_REDIS_URL}"
+        f" redis={_redacted(_REDIS_URL)}"
         f" pid={os.getpid()}",
         flush=True,
     )
