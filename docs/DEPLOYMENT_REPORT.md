@@ -87,8 +87,8 @@ All settings live in `/opt/pcp/.env.production`, readable only by the server's `
 | `AI_INTERNAL_KEY` | Shared secret between backend and AI service | Generated on server |
 | `REDIS_PASSWORD` | Redis authentication | Generated on server |
 | `POSTGRES_PASSWORD`, `DATABASE_URL` | Database login and connection | Generated on server; database runs in Docker |
-| `LLM_PROVIDER`, `LLM_MODEL` | AI interviewer model | Groq, `openai/gpt-oss-120b` |
-| `LLM_FALLBACK_MODELS` | Used when the main model's daily limit is reached | `openai/gpt-oss-20b`, `qwen/qwen3.8-27b` |
+| `LLM_PROVIDER`, `LLM_MODEL` | AI interviewer model | Groq, `qwen/qwen3.8-27b` |
+| `LLM_FALLBACK_MODELS` | Used when the main model's daily limit is reached | `openai/gpt-oss-120b`, `openai/gpt-oss-20b` |
 | `LLM_API_KEY`, `LLM_FALLBACK_API_KEYS` | LLM access | Temporary test keys |
 | `TRUST_PROXY` | Reads the visitor's real IP through Caddy and nginx | `2` |
 | `SEED_DEMO_DATA` | Loads the demo accounts | `true` |

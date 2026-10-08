@@ -206,7 +206,7 @@ ON CONFLICT (document_id, chunk_index) DO NOTHING;
 INSERT INTO assessment.assessments (id, name, assessment_type, interview_type, version, is_active)
 VALUES (
   'a0000000-0000-0000-0000-000000000001',
-  'Technical Interview Round 1', 'INTERVIEW', 'TECHNICAL', 1, true
+  'Technical Interview Round 1', 'MOCK_INTERVIEW', 'TECHNICAL', 1, true
 )
 ON CONFLICT DO NOTHING;
 

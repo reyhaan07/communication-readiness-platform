@@ -27,7 +27,7 @@ import {
   MOCK_ASSIGNMENTS,
   MOCK_MENTEES_LIST
 } from '../data/mockData';
-import { api } from '../services/api';
+import { api, SESSION_ENDED_EVENT } from '../services/api';
 import { logger } from '../services/logger';
 import { closeTopModal } from '../utils/modalManager';
 
@@ -110,6 +110,8 @@ export interface ImpersonationSession {
 
 export interface AppContextType {
   isAuthenticated: boolean;
+  // Shown in the sign-in dialog, e.g. after the session ended
+  authNotice: string | null;
   currentUser: AuthUser | null;
   authModalOpen: boolean;
   authModalMode: 'login' | 'register' | 'register_institution';
@@ -241,6 +243,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'register_institution'>('login');
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [confirmSignOutOpen, setConfirmSignOutOpen] = useState(false);
   const [abandonWarningOpen, setAbandonWarningOpen] = useState(false);
   const abandonWarningOpenRef = useRef<boolean>(abandonWarningOpen);
@@ -1741,6 +1744,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuthModalOpen(true);
   };
 
+  // The server rejected the session (expired, revoked, or an account it never issued).
+  // Clear the signed-in state and ask the user to sign in again, instead of leaving the
+  // app showing a dashboard whose every request fails.
+  useEffect(() => {
+    const onSessionEnded = () => {
+      if (!isAuthenticatedRef.current) return;
+      logger.info('AUTH', 'Session ended by the server; returning to sign-in');
+      if (typeof document !== 'undefined' && document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
+      setInterviewState(prev => ({ ...prev, isActive: false }));
+      setCurrentUser(null);
+      setIsAuthenticated(false);
+      setActiveRole('STUDENT');
+      setActiveView('DASHBOARD', true);
+      setStudent(DEFAULT_CLEAN_STUDENT);
+      setLatestReport(null);
+      setImpersonationSession(null);
+      localStorage.removeItem('auth_user');
+      setAuthNotice('Your session has ended. Please sign in again.');
+      setAuthModalMode('login');
+      setAuthModalOpen(true);
+    };
+    window.addEventListener(SESSION_ENDED_EVENT, onSessionEnded);
+    return () => window.removeEventListener(SESSION_ENDED_EVENT, onSessionEnded);
+  }, []);
+
   const closeAuthModal = () => {
     setAuthModalOpen(false);
   };
@@ -1774,6 +1804,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser(authUser);
     setActiveRole(user.role as UserRole);
     setIsAuthenticated(true);
+    setAuthNotice(null);
     localStorage.setItem('auth_user', JSON.stringify(authUser));
     setAuthModalOpen(false);
     logger.info('AUTH', `Login: ${authUser.email} (${authUser.role})`);
@@ -1803,6 +1834,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser(authUser);
     setActiveRole(authUser.role);
     setIsAuthenticated(true);
+    setAuthNotice(null);
     localStorage.setItem('auth_user', JSON.stringify(authUser));
     setAuthModalOpen(false);
   };
@@ -2104,6 +2136,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   return (
     <AppContext.Provider value={{
       isAuthenticated,
+      authNotice,
       currentUser,
       authModalOpen,
       authModalMode,

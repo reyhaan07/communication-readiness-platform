@@ -56,7 +56,7 @@ python -m venv .venv
 LLM_PROVIDER=groq
 LLM_API_KEY=<groq key>
 GROQ_API_KEY=<groq key>
-LLM_MODEL=openai/gpt-oss-120b
+LLM_MODEL=qwen/qwen3.8-27b
 REDIS_URL=
 ```
 Without a key the service falls back to a mock LLM that returns fixed scores.

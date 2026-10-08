@@ -307,6 +307,9 @@ function synthesizeDynamicReport(
 }
 
 // Backend origin for a separately hosted frontend, e.g. https://api.example.com (no /api)
+// Fired when the server rejects the session; AppContext returns the user to sign-in.
+export const SESSION_ENDED_EVENT = 'auth:session-ended';
+
 export const API_ORIGIN = String(import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '').replace(/\/api$/, '');
 
 class ApiClient {
@@ -378,8 +381,13 @@ class ApiClient {
         message: response.statusText
       }));
       if (response.status === 401) {
-        // Unauthorized - clear token; surface the server message (e.g. "Invalid email or password")
+        // The session is not valid (expired, revoked, or never issued by the server):
+        // drop the token and tell the app, which returns to sign-in instead of carrying
+        // on without one. Wrong credentials at sign-in are only reported.
         this.setToken(null);
+        if (!endpoint.startsWith('/auth/login') && !endpoint.startsWith('/auth/register')) {
+          window.dispatchEvent(new CustomEvent(SESSION_ENDED_EVENT, { detail: errorData.message }));
+        }
         throw new Error(errorData.message || 'Authentication required');
       }
       throw new Error(errorData.message || `API Error: ${response.status}`);
@@ -1723,94 +1731,59 @@ class ApiClient {
       }
     },
 
+    // Self sign-up: the server creates the account (in the Independent Candidates cohort)
     registerCandidate: async (candidateData: { name: string; email: string; password?: string }) => {
-      const users = this.getStorage<any[]>('college_registered_users', []);
-      const studentId = `cand_${Date.now().toString().slice(-4)}`;
-      const newUser: AuthUser = {
-        id: `usr_${Date.now()}`,
-        name: candidateData.name || 'Independent Candidate',
-        email: candidateData.email.toLowerCase().trim(),
+      const response = await this.fetchAPI<{
+        token: string;
+        user: { id: string; name: string; email: string; role: string };
+        studentId: string;
+      }>('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: candidateData.name,
+          email: candidateData.email,
+          password: candidateData.password ?? '',
+        }),
+      });
+      this.setToken(response.token);
+      const user: AuthUser = {
+        id: response.user.id,
+        name: response.user.name,
+        email: response.user.email,
         role: 'STUDENT',
-        studentId,
-        department: 'Independent Study',
-        batchYear: 2026,
-        track: 'EXTERNAL',
-        isIndependent: true
-      };
-
-      users.push({ ...newUser, password: candidateData.password });
-      this.setStorage('college_registered_users', users);
-
-      const freshProfile: StudentProfile = {
-        id: studentId,
-        name: newUser.name,
-        email: newUser.email,
-        rollNumber: `IND-${Math.floor(1000 + Math.random() * 9000)}`,
-        department: 'Independent / Self-Registered',
-        batchYear: 2026,
-        track: 'EXTERNAL',
+        studentId: response.studentId,
         isIndependent: true,
-        mentorName: 'Self-Paced Practice',
-        mentorEmail: 'open@platform.com',
-        codingHandles: { leetcodeSolved: 0, githubRepos: 0 },
-        resume: null,
-        criteriaTasks: DEFAULT_CLEAN_STUDENT.criteriaTasks,
-        recentReports: [],
-        coins: 5
       };
-
-      this.setStorage(`student_profile_${studentId}`, freshProfile);
-      this.setStorage('student_profile', freshProfile);
-
-      const token = `jwt_dyn_${Date.now()}`;
-      this.setToken(token);
-      localStorage.setItem('auth_user', JSON.stringify(newUser));
-
-      return { user: newUser, token, studentId };
+      localStorage.setItem('auth_user', JSON.stringify(user));
+      return { user, token: response.token, studentId: response.studentId };
     },
 
+    // Student sign-up into a college batch when one is given, else as an independent candidate
     register: async (userData: any) => {
-      const users = this.getStorage<any[]>('college_registered_users', []);
-      const studentId = `stu_${Date.now().toString().slice(-4)}`;
-      const newUser: AuthUser = {
-        id: `usr_${Date.now()}`,
-        name: userData.name || 'New Candidate',
-        email: userData.email,
-        role: userData.role || 'STUDENT',
-        studentId,
-        department: userData.department || 'Computer Science & Engineering',
-        batchYear: userData.batchYear || 2026,
-        track: userData.track || 'General Track',
-        isIndependent: userData.isIndependent || false
+      const response = await this.fetchAPI<{
+        token: string;
+        user: { id: string; name: string; email: string; role: string };
+        studentId: string;
+      }>('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: userData.name,
+          email: userData.email,
+          password: userData.password ?? '',
+          ...(userData.batchId ? { batchId: userData.batchId } : {}),
+          ...(userData.rollNumber ? { rollNumber: userData.rollNumber } : {}),
+        }),
+      });
+      this.setToken(response.token);
+      const user: AuthUser = {
+        id: response.user.id,
+        name: response.user.name,
+        email: response.user.email,
+        role: 'STUDENT',
+        studentId: response.studentId,
       };
-
-      users.push(newUser);
-      this.setStorage('college_registered_users', users);
-
-      const freshProfile: StudentProfile = {
-        id: studentId,
-        name: newUser.name,
-        email: newUser.email,
-        rollNumber: userData.rollNumber || `22CS${Math.floor(1000 + Math.random() * 9000)}`,
-        department: newUser.department || 'General',
-        batchYear: newUser.batchYear || 2026,
-        track: newUser.track || 'General Track',
-        mentorName: 'Dr. S. Ranganathan',
-        mentorEmail: 'ranganathan.s@college.edu',
-        codingHandles: { leetcodeSolved: 0, githubRepos: 0 },
-        resume: null,
-        criteriaTasks: DEFAULT_CLEAN_STUDENT.criteriaTasks,
-        recentReports: [],
-        coins: 5
-      };
-      this.setStorage(`student_profile_${studentId}`, freshProfile);
-      this.setStorage('student_profile', freshProfile);
-
-      const token = `jwt_dyn_${Date.now()}`;
-      this.setToken(token);
-      localStorage.setItem('auth_user', JSON.stringify(newUser));
-
-      return { user: newUser, token, studentId };
+      localStorage.setItem('auth_user', JSON.stringify(user));
+      return { user, token: response.token, studentId: response.studentId };
     },
 
     registerExternal: async (userData: { name: string; email: string; password?: string; department?: string; batchYear?: number }) => {
@@ -1908,81 +1881,36 @@ class ApiClient {
       password?: string;
       contactPhone?: string;
     }): Promise<{ college: College; user: AuthUser; token: string }> => {
-      const cleanInstName = data.institutionName.trim();
-      const cleanInstCode = data.institutionCode.toUpperCase().trim();
-      const cleanCity = data.campusCity.trim();
-      const cleanAdminName = data.adminName.trim();
-      const cleanAdminEmail = data.adminEmail.toLowerCase().trim();
-      const pwd = (data.password && data.password.trim()) || 'admin123';
-
-      if (!cleanInstName) throw new Error('Institution name is required.');
-      if (!cleanInstCode) throw new Error('Institution short code is required.');
-      if (!cleanCity) throw new Error('Campus city or location is required.');
-      if (!cleanAdminName) throw new Error('Administrator name is required.');
-      if (!cleanAdminEmail || !cleanAdminEmail.includes('@')) {
-        throw new Error('A valid administrator email address is required.');
-      }
-
-      const colleges = this.getStorage<College[]>('platform_colleges', MOCK_COLLEGES);
-      const existingCollege = colleges.find(c => 
-        c.name.toLowerCase() === cleanInstName.toLowerCase() ||
-        c.code.toLowerCase() === cleanInstCode.toLowerCase()
-      );
-      if (existingCollege) {
-        throw new Error(`An institution with name "${cleanInstName}" or code "${cleanInstCode}" is already registered.`);
-      }
-
-      const users = this.getStorage<any[]>('college_registered_users', []);
-      const existingUser = users.find(u => u.email.toLowerCase().trim() === cleanAdminEmail);
-      if (existingUser) {
-        throw new Error(`An account with email "${cleanAdminEmail}" is already registered. Please sign in or use a different administrator email.`);
-      }
-
-      const collegeId = `col-${Date.now()}`;
-      const newCollege: College = {
-        id: collegeId,
-        name: cleanInstName,
-        code: cleanInstCode,
-        campusCity: cleanCity,
-        createdAt: new Date().toISOString(),
-        superAdminEmail: cleanAdminEmail,
-        superAdminName: cleanAdminName,
-        superAdminStatus: 'ACTIVE'
-      };
-      colleges.push(newCollege);
-      this.setStorage('platform_colleges', colleges);
-
-      // Create foundational departments for this institution
-      const depts = this.getStorage<DynamicDepartment[]>('platform_departments', MOCK_DYNAMIC_DEPARTMENTS);
-      const initialDepts: DynamicDepartment[] = [
-        { id: `dept_${Date.now()}_1`, collegeId, name: 'Computer Science & Engineering', code: 'CSE', adminPermissions: ['CAN_VIEW_STUDENT_PROGRESS', 'CAN_MANAGE_STUDENTS'] },
-        { id: `dept_${Date.now()}_2`, collegeId, name: 'Information Technology', code: 'IT', adminPermissions: ['CAN_VIEW_STUDENT_PROGRESS', 'CAN_MANAGE_STUDENTS'] },
-        { id: `dept_${Date.now()}_3`, collegeId, name: 'Electronics & Communication Engineering', code: 'ECE', adminPermissions: ['CAN_VIEW_STUDENT_PROGRESS'] }
-      ];
-      this.setStorage('platform_departments', [...depts, ...initialDepts]);
-
-      // Create Super Admin user record
-      const userRecord: AuthUser = {
-        id: `usr_sup_${Date.now()}`,
-        name: cleanAdminName,
-        email: cleanAdminEmail,
+      const response = await this.fetchAPI<{
+        token: string;
+        user: { id: string; name: string; email: string; role: string };
+        institution: { id: string; name: string; code: string; campusCity: string; createdAt: string };
+      }>('/auth/register-institution', {
+        method: 'POST',
+        body: JSON.stringify({ ...data, password: data.password ?? '' }),
+      });
+      this.setToken(response.token);
+      const inst = response.institution;
+      const user: AuthUser = {
+        id: response.user.id,
+        name: response.user.name,
+        email: response.user.email,
         role: 'SUPER_ADMIN',
-        collegeId,
-        collegeName: cleanInstName,
-        permissions: ['CAN_VIEW_STUDENT_PROGRESS', 'CAN_ASSIGN_INTERVIEWS', 'CAN_ASSIGN_LISTENING', 'CAN_MANAGE_STUDENTS']
+        collegeId: inst.id,
+        collegeName: inst.name,
       };
-      users.push({ ...userRecord, password: pwd });
-      this.setStorage('college_registered_users', users);
-
-      const token = `jwt_dyn_${Date.now()}`;
-      this.setToken(token);
-      localStorage.setItem('auth_user', JSON.stringify(userRecord));
-
-      return {
-        college: newCollege,
-        user: userRecord,
-        token
+      localStorage.setItem('auth_user', JSON.stringify(user));
+      const college: College = {
+        id: inst.id,
+        name: inst.name,
+        code: inst.code,
+        campusCity: inst.campusCity,
+        createdAt: inst.createdAt,
+        superAdminEmail: user.email,
+        superAdminName: user.name,
+        superAdminStatus: 'ACTIVE',
       };
+      return { college, user, token: response.token };
     },
 
     me: async () => {

@@ -19,7 +19,7 @@ PROVIDER_PRESETS: dict[str, str] = {
 }
 
 DEFAULT_MODELS: dict[str, str] = {
-    "groq":       "openai/gpt-oss-120b",
+    "groq":       "qwen/qwen3.8-27b",
     "openai":     "gpt-4o-mini",
     "together":   "meta-llama/Llama-3-70b-chat-hf",
     "perplexity": "llama-3.1-sonar-small-128k-online",

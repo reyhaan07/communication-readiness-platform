@@ -29,7 +29,8 @@ export const AuthModal: React.FC = () => {
     loginWithAuthUser,
     registerCandidate,
     registerInstitution,
-    setActiveView
+    setActiveView,
+    authNotice
   } = useApp();
 
   useBackHandler(authModalOpen, closeAuthModal);
@@ -105,8 +106,8 @@ export const AuthModal: React.FC = () => {
       setError('Please fill in your name, email, and password.');
       return;
     }
-    if (regPassword.length < 6) {
-      setError('Password must be at least 6 characters.');
+    if (regPassword.length < 8) {
+      setError('Password must be at least 8 characters.');
       return;
     }
     if (regPassword !== regConfirmPassword) {
@@ -134,8 +135,8 @@ export const AuthModal: React.FC = () => {
       setError('Please fill in all required institution and administrator fields.');
       return;
     }
-    if (!instPassword || instPassword.length < 6) {
-      setError('Password must be at least 6 characters.');
+    if (!instPassword || instPassword.length < 8) {
+      setError('Password must be at least 8 characters.');
       return;
     }
     if (instPassword !== instConfirmPassword) {
@@ -295,6 +296,13 @@ export const AuthModal: React.FC = () => {
 
         {/* Body Content */}
         <div className="p-6 space-y-4 overflow-y-auto">
+          {authNotice && !error && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-start space-x-2 animate-in fade-in duration-150">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <span>{authNotice}</span>
+            </div>
+          )}
+
           {error && (
             <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start space-x-2 animate-in fade-in duration-150">
               <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />

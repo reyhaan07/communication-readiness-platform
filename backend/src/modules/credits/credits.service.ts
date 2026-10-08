@@ -22,6 +22,14 @@ export class CreditService {
     try {
       await client.query('BEGIN');
 
+      // Lock the account row first: a concurrent call with the same key then waits here
+      // and finds the committed transaction below instead of failing on the unique key.
+      const { rows: accounts } = await client.query(
+        'SELECT id, balance FROM credit.credit_accounts WHERE student_id = $1 FOR UPDATE',
+        [studentId]
+      );
+      if (accounts.length === 0) throw new AppError(404, 'Credit account not found', 'NOT_FOUND');
+
       // Idempotency guard
       const { rows: dup } = await client.query(
         'SELECT id, balance_after FROM credit.credit_transactions WHERE idempotency_key = $1',
@@ -31,13 +39,6 @@ export class CreditService {
         await client.query('ROLLBACK');
         return { newBalance: Number(dup[0].balance_after), transactionId: dup[0].id as string };
       }
-
-      // Lock account row
-      const { rows: accounts } = await client.query(
-        'SELECT id, balance FROM credit.credit_accounts WHERE student_id = $1 FOR UPDATE',
-        [studentId]
-      );
-      if (accounts.length === 0) throw new AppError(404, 'Credit account not found', 'NOT_FOUND');
 
       const currentBalance = Number(accounts[0].balance);
       if (currentBalance < amount) {
@@ -84,6 +85,14 @@ export class CreditService {
     try {
       await client.query('BEGIN');
 
+      // Account lock before the idempotency check, as in consume(): the completion
+      // handler and the live interview can reward the same session at the same moment.
+      const { rows: accounts } = await client.query(
+        'SELECT id, balance FROM credit.credit_accounts WHERE student_id = $1 FOR UPDATE',
+        [studentId]
+      );
+      if (accounts.length === 0) throw new AppError(404, 'Credit account not found', 'NOT_FOUND');
+
       const { rows: dup } = await client.query(
         'SELECT id, balance_after FROM credit.credit_transactions WHERE idempotency_key = $1',
         [idempotencyKey]
@@ -92,12 +101,6 @@ export class CreditService {
         await client.query('ROLLBACK');
         return { newBalance: Number(dup[0].balance_after), transactionId: dup[0].id as string };
       }
-
-      const { rows: accounts } = await client.query(
-        'SELECT id, balance FROM credit.credit_accounts WHERE student_id = $1 FOR UPDATE',
-        [studentId]
-      );
-      if (accounts.length === 0) throw new AppError(404, 'Credit account not found', 'NOT_FOUND');
 
       // Fetch cap from global policy
       const { rows: policies } = await client.query(

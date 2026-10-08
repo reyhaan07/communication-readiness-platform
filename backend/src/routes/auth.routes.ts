@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { PoolClient } from 'pg';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
@@ -38,42 +39,92 @@ function signToken(user: AuthUser): string {
 // ── POST /api/auth/register ────────────────────────────────────────────────────
 
 const registerSchema = z.object({
-  name: z.string().min(2).max(255),
-  email: z.string().email().transform(s => s.toLowerCase()),
+  name: z.string().trim().min(2, 'Enter your full name').max(255),
+  email: z.string().trim().email('Enter a valid email address').transform(s => s.toLowerCase()),
   password: z.string().min(8, 'Password must be at least 8 characters'),
-  batchId: z.string().uuid(),
+  // Omitted when a student signs up on their own, without a college batch
+  batchId: z.string().uuid().optional(),
   subdivisionId: z.string().uuid().optional(),
   rollNumber: z.string().trim().min(1).max(50).optional(),
 });
 
+const firstIssue = (error: z.ZodError) => error.issues[0]?.message || 'Validation failed';
+
+interface BatchPlacement { id: string; program_id: string; institution_id: string }
+
+/**
+ * Students who sign up on their own join one shared cohort (institution INDEPENDENT,
+ * program SELF, one batch per year), created on first use. Runs inside the caller's
+ * transaction; the advisory lock stops two sign-ups from creating it twice.
+ */
+async function independentBatch(client: PoolClient): Promise<BatchPlacement> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext('independent-cohort'))`);
+  const year = new Date().getFullYear();
+
+  let { rows: inst } = await client.query<{ id: string }>(
+    `SELECT id FROM org.institutions WHERE code = 'INDEPENDENT'`
+  );
+  if (inst.length === 0) {
+    ({ rows: inst } = await client.query<{ id: string }>(
+      `INSERT INTO org.institutions (name, code) VALUES ('Independent Candidates', 'INDEPENDENT') RETURNING id`
+    ));
+  }
+  let { rows: prog } = await client.query<{ id: string }>(
+    `SELECT id FROM org.programs WHERE institution_id = $1 AND code = 'SELF'`, [inst[0].id]
+  );
+  if (prog.length === 0) {
+    ({ rows: prog } = await client.query<{ id: string }>(
+      `INSERT INTO org.programs (institution_id, name, code) VALUES ($1, 'Self-Practice', 'SELF') RETURNING id`,
+      [inst[0].id]
+    ));
+  }
+  let { rows: batch } = await client.query<{ id: string }>(
+    `SELECT id FROM org.batches WHERE program_id = $1 AND year = $2 ORDER BY created_at LIMIT 1`,
+    [prog[0].id, year]
+  );
+  if (batch.length === 0) {
+    ({ rows: batch } = await client.query<{ id: string }>(
+      `INSERT INTO org.batches (program_id, name, year) VALUES ($1, $2, $3) RETURNING id`,
+      [prog[0].id, `Independent ${year}`, year]
+    ));
+  }
+  return { id: batch[0].id, program_id: prog[0].id, institution_id: inst[0].id };
+}
+
 authRouter.post('/register', async (req: Request, res: Response): Promise<void> => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
-    sendError(res, new AppError(422, 'Validation failed', 'VALIDATION_ERROR'));
+    sendError(res, new AppError(422, firstIssue(parsed.error), 'VALIDATION_ERROR'));
     return;
   }
   const { name, email, password, batchId, subdivisionId, rollNumber } = parsed.data;
 
   const client = await db.connect();
   try {
-    const { rows: batchRows } = await client.query<{ id: string; program_id: string; institution_id: string }>(
-      `SELECT b.id, b.program_id, p.institution_id
-       FROM org.batches b JOIN org.programs p ON p.id = b.program_id
-       WHERE b.id = $1 AND b.is_active = true`,
-      [batchId]
-    );
-    if (batchRows.length === 0) {
-      throw new AppError(404, 'Batch not found', 'NOT_FOUND');
-    }
-
     const passwordHash = await bcrypt.hash(password, 10);
 
     await client.query('BEGIN');
     try {
+      let placement: BatchPlacement;
+      if (batchId) {
+        const { rows: batchRows } = await client.query<BatchPlacement>(
+          `SELECT b.id, b.program_id, p.institution_id
+           FROM org.batches b JOIN org.programs p ON p.id = b.program_id
+           WHERE b.id = $1 AND b.is_active = true`,
+          [batchId]
+        );
+        if (batchRows.length === 0) {
+          throw new AppError(404, 'Batch not found', 'NOT_FOUND');
+        }
+        placement = batchRows[0];
+      } else {
+        placement = await independentBatch(client);
+      }
+
       const { rows: userRows } = await client.query<{ id: string }>(
         `INSERT INTO identity.users (name, email, password_hash, role, token_version, status, institution_id)
          VALUES ($1, $2, $3, 'STUDENT', 0, 'ACTIVE', $4) RETURNING id`,
-        [name, email, passwordHash, batchRows[0].institution_id]
+        [name, email, passwordHash, placement.institution_id]
       );
       const userId = userRows[0].id;
 
@@ -81,7 +132,7 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
       const { rows: studentRows } = await client.query<{ id: string }>(
         `INSERT INTO org.students (user_id, roll_number, program_id, batch_id, subdivision_id)
          VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [userId, rollNumber ?? null, batchRows[0].program_id, batchId, subdivisionId ?? null]
+        [userId, rollNumber ?? null, placement.program_id, placement.id, batchId ? subdivisionId ?? null : null]
       );
       const studentId = studentRows[0].id;
 
@@ -104,7 +155,79 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
       const isRollNumber = (err as { constraint?: string }).constraint === 'uq_students_roll_number';
       sendError(res, isRollNumber
         ? new AppError(409, 'Roll number already registered', 'DUPLICATE_ROLL_NUMBER')
-        : new AppError(409, 'Email already registered', 'DUPLICATE_EMAIL'));
+        : new AppError(409, 'An account with this email already exists. Please sign in instead.', 'DUPLICATE_EMAIL'));
+      return;
+    }
+    sendError(res, err);
+  } finally {
+    client.release();
+  }
+});
+
+// ── POST /api/auth/register-institution ───────────────────────────────────────
+// A college signs up: creates the institution and its Super Admin account.
+
+const institutionSignupSchema = z.object({
+  institutionName: z.string().trim().min(2, 'Enter the institution name').max(255),
+  institutionCode: z.string().trim().min(2, 'Enter a short code for the institution').max(20)
+    .regex(/^[A-Za-z0-9_-]+$/, 'The short code may only use letters, digits, - and _')
+    .transform(s => s.toUpperCase()),
+  campusCity: z.string().trim().min(2, 'Enter the campus city').max(100),
+  adminName: z.string().trim().min(2, 'Enter the administrator name').max(255),
+  adminEmail: z.string().trim().email('Enter a valid administrator email').transform(s => s.toLowerCase()),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  contactPhone: z.string().trim().max(30).optional(),
+});
+
+authRouter.post('/register-institution', async (req: Request, res: Response): Promise<void> => {
+  const parsed = institutionSignupSchema.safeParse(req.body);
+  if (!parsed.success) {
+    sendError(res, new AppError(422, firstIssue(parsed.error), 'VALIDATION_ERROR'));
+    return;
+  }
+  const { institutionName, institutionCode, campusCity, adminName, adminEmail, password } = parsed.data;
+
+  const client = await db.connect();
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    await client.query('BEGIN');
+    try {
+      const { rows: clash } = await client.query(
+        'SELECT 1 FROM org.institutions WHERE code = $1 OR lower(name) = lower($2)',
+        [institutionCode, institutionName]
+      );
+      if (clash.length > 0) {
+        throw new AppError(409, `An institution named "${institutionName}" or with code ${institutionCode} is already registered.`, 'DUPLICATE_INSTITUTION');
+      }
+      const { rows: inst } = await client.query<{ id: string; name: string; code: string; campus_city: string; created_at: Date }>(
+        `INSERT INTO org.institutions (name, code, campus_city) VALUES ($1, $2, $3)
+         RETURNING id, name, code, campus_city, created_at`,
+        [institutionName, institutionCode, campusCity]
+      );
+      const { rows: userRows } = await client.query<{ id: string }>(
+        `INSERT INTO identity.users (name, email, password_hash, role, token_version, status, institution_id)
+         VALUES ($1, $2, $3, 'SUPER_ADMIN', 0, 'ACTIVE', $4) RETURNING id`,
+        [adminName, adminEmail, passwordHash, inst[0].id]
+      );
+      await client.query('COMMIT');
+
+      const authUser: AuthUser = { id: userRows[0].id, email: adminEmail, role: 'SUPER_ADMIN', name: adminName, tokenVersion: 0 };
+      sendSuccess(res, {
+        token: signToken(authUser),
+        user: { id: authUser.id, name: adminName, email: adminEmail, role: 'SUPER_ADMIN' },
+        institution: {
+          id: inst[0].id, name: inst[0].name, code: inst[0].code,
+          campusCity: inst[0].campus_city, createdAt: inst[0].created_at,
+        },
+      }, 201);
+    } catch (innerErr) {
+      await client.query('ROLLBACK');
+      throw innerErr;
+    }
+  } catch (err) {
+    if (err instanceof AppError) { sendError(res, err); return; }
+    if ((err as { code?: string }).code === '23505') {
+      sendError(res, new AppError(409, 'An account with this email already exists. Please sign in instead.', 'DUPLICATE_EMAIL'));
       return;
     }
     sendError(res, err);
@@ -183,14 +306,24 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
 });
 
 // ── POST /api/auth/logout ──────────────────────────────────────────────────────
+// Ends this browser's session only: the client discards its token. Revoking every
+// token of the account here would also sign out everyone else using it (another
+// device, or teammates sharing a demo account).
 
-authRouter.post('/logout', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
+authRouter.post('/logout', authenticate, async (_req: AuthRequest, res: Response): Promise<void> => {
+  sendSuccess(res, { message: 'Logged out successfully' });
+});
+
+// ── POST /api/auth/logout-all ──────────────────────────────────────────────────
+// Signs the account out everywhere (e.g. after a lost device): all its tokens stop working.
+
+authRouter.post('/logout-all', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await db.query(
       'UPDATE identity.users SET token_version = token_version + 1 WHERE id = $1',
       [req.user!.id]
     );
-    sendSuccess(res, { message: 'Logged out successfully' });
+    sendSuccess(res, { message: 'Signed out on all devices' });
   } catch (err) {
     sendError(res, err);
   }

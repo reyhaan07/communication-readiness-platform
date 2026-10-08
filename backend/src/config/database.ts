@@ -6,7 +6,7 @@ import { pgConnectionConfig } from './pgConnection';
 // Postgres connections need more time than the default 2 s budget.
 export const db = new Pool({
   ...pgConnectionConfig(env.DATABASE_URL),
-  max: 30,
+  max: env.DB_POOL_MAX,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
 });

@@ -12,6 +12,9 @@ const schema = z.object({
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
   JWT_EXPIRES_IN: z.string().default('7d'),
   DATABASE_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/comm_readiness'),
+  // Connection pool size. Keep it under the database's limit: a Supabase session-mode
+  // pooler allows about 15 connections per project on the smaller plans.
+  DB_POOL_MAX: z.coerce.number().int().min(1).default(30),
   UPLOAD_MAX_FILE_SIZE_MB: z.coerce.number().default(5),
   UPLOAD_DIR: z.string().default('uploads'),
   // Shared secret for internal calls to the Python AI service
