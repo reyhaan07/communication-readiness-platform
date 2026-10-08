@@ -79,6 +79,7 @@ export interface PendingInvite {
   createdAt: string;
   expiresAt?: string;
   status: 'PENDING' | 'ACCEPTED';
+  alreadyAccepted?: boolean;
 }
 
 export type Difficulty = 'EASY' | 'MEDIUM' | 'ADVANCED';
@@ -332,6 +333,7 @@ export interface AssignmentSubmission {
   studentId: string;
   studentName: string;
   studentRollNumber: string;
+  studentEmail?: string;
   score: number;
   submittedAt: string;
   sessionType: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' | 'BOTH';
@@ -343,6 +345,7 @@ export interface AssignmentSubmission {
   recommendation?: 'PLACEMENT_READY' | 'ON_TRACK' | 'NEEDS_PRACTICE' | 'AT_RISK' | 'DISQUALIFIED';
   isDisqualified?: boolean;
   disqualificationReason?: string;
+  report?: any;
 }
 
 export interface AppNotification {
@@ -393,7 +396,7 @@ export interface InterviewAssignment {
   collegeId?: string;
 
   // Targeting scope
-  targetScope: 'ALL_STUDENTS' | 'PROGRAM' | 'DEPARTMENT' | 'MY_MENTEES' | 'SPECIFIC_STUDENT' | 'CLASS';
+  targetScope: 'ALL_STUDENTS' | 'PROGRAM' | 'DEPARTMENT' | 'MY_MENTEES' | 'SPECIFIC_STUDENT' | 'CLASS' | 'BATCH';
   targetDomainOrTrack?: string;
   targetProgramName?: string;
   targetProgramNames?: string[];

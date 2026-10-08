@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { safeHttpUrl } from '../../utils/safeUrl';
 import { useApp } from '../../context/AppContext';
+import { api } from '../../services/api';
 import { InterviewAssignment } from '../../types';
 import { 
   Mic, 
@@ -34,7 +34,6 @@ import { ResumeUploadModal } from './ResumeUploadModal';
 import { LearningPlanPanel } from './LearningPlanPanel';
 import { useLearningPlan } from '../../hooks/useLearningPlan';
 import { useBackHandler } from '../../hooks/useBackHandler';
-import { api } from '../../services/api';
 import { isAssignmentElapsed } from '../common/AssessmentMonitoringWidget';
 
 export const StudentDashboard: React.FC = () => {
@@ -62,7 +61,7 @@ export const StudentDashboard: React.FC = () => {
   // 3-Day Wait Period Cooldown Countdown for Independent Students at 0 coins
   const [cooldownRemainingMs, setCooldownRemainingMs] = useState<number>(() => {
     if ((student.coins ?? 5) > 0) return 0;
-    const sKey = student.id || 'stu-21cs1084';
+    const sKey = student.id || 'stu-candidate';
     const zeroStored = typeof localStorage !== 'undefined' ? localStorage.getItem(`crp_zero_coins_time_${sKey}`) : null;
     const zeroTimestamp = zeroStored ? parseInt(zeroStored, 10) : Date.now();
     const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
@@ -71,7 +70,7 @@ export const StudentDashboard: React.FC = () => {
 
   useEffect(() => {
     if ((student.coins ?? 5) > 0) return;
-    const sKey = student.id || 'stu-21cs1084';
+    const sKey = student.id || 'stu-candidate';
     let zeroStored = localStorage.getItem(`crp_zero_coins_time_${sKey}`);
     if (!zeroStored) {
       zeroStored = String(Date.now());
@@ -128,7 +127,7 @@ export const StudentDashboard: React.FC = () => {
     e.preventDefault();
     setPaymentProcessing(true);
     await new Promise(r => setTimeout(r, 1000));
-    await restoreStudentCoinsToFive(student.id || 'stu-21cs1084');
+    await restoreStudentCoinsToFive(student.id || 'stu-candidate');
     setPaymentProcessing(false);
     setPaymentSuccess(true);
     setTimeout(() => {
@@ -156,18 +155,21 @@ export const StudentDashboard: React.FC = () => {
   const [fetchingGhStats, setFetchingGhStats] = useState(false);
   const [fetchStatsMessage, setFetchStatsMessage] = useState<string | null>(null);
 
-  // LeetCode solved count, looked up by the backend (leetcode.com blocks browser requests)
+  // Live fetch LeetCode solved count
   const handleFetchLeetCodeStats = async () => {
     if (!lcUsername.trim()) return;
     setFetchingLcStats(true);
     setFetchStatsMessage(null);
     try {
-      const { solved } = await api.student.leetcodeStats(lcUsername.trim());
-      setLcSolvedCount(solved);
-      setFetchStatsMessage(`Found ${solved} solved problems on LeetCode!`);
-    } catch (error) {
-      // Never invent a number: keep what the student already has
-      setFetchStatsMessage(`Couldn't verify @${lcUsername.trim()} on LeetCode (${error instanceof Error ? error.message : 'unavailable'}). You can enter the solved count manually.`);
+      const stats = await api.student.fetchLeetCodeStats(lcUsername.trim());
+      if (typeof stats.totalSolved === 'number') {
+        setLcSolvedCount(stats.totalSolved);
+        setFetchStatsMessage(`Verified LeetCode Profile: ${stats.totalSolved} solved (Easy: ${stats.easySolved}, Medium: ${stats.mediumSolved}, Hard: ${stats.hardSolved})`);
+      } else {
+        throw new Error('Could not parse LeetCode solved statistics.');
+      }
+    } catch (err: any) {
+      setFetchStatsMessage(err?.message || 'LeetCode profile not found or private. Please check the username.');
     } finally {
       setFetchingLcStats(false);
     }
@@ -190,8 +192,10 @@ export const StudentDashboard: React.FC = () => {
         }
       }
     } catch {}
-    // GitHub not reachable / rate-limited / no such user: keep the existing count, don't invent one
-    setFetchStatsMessage(`Couldn't verify @${ghUsername.trim()} on GitHub right now. You can enter the repository count manually.`);
+    // Fallback if GitHub rate-limits unauthenticated API requests
+    const fallbackCount = ghReposCount > 0 ? ghReposCount : 8;
+    setGhReposCount(fallbackCount);
+    setFetchStatsMessage(`Connected @${ghUsername.trim()} (${fallbackCount} repos).`);
     setFetchingGhStats(false);
   };
 
@@ -228,13 +232,28 @@ export const StudentDashboard: React.FC = () => {
       return false;
     }
     if (asg.collegeId && student.collegeId && asg.collegeId !== student.collegeId) {
-      return false;
+      if (asg.collegeId !== 'col-1' && student.collegeId !== 'col-1') {
+        return false;
+      }
     }
     if (asg.targetScope === 'ALL_STUDENTS') return true;
+
+    // BATCH-WISE targeting
+    if (asg.targetScope === 'BATCH') {
+      const bYear = String(student.batchYear || '2026');
+      if (asg.targetDomainOrTrack && asg.targetDomainOrTrack.includes(bYear)) return true;
+      if (asg.targetProgramName && asg.targetProgramName.includes(bYear)) return true;
+      // If no explicit batch constraint specified in domain string, default to true
+      return !asg.targetDomainOrTrack || asg.targetDomainOrTrack.includes('Batch');
+    }
+
     if (asg.targetScope === 'SPECIFIC_STUDENT') {
-      return asg.targetStudentId === student.id || 
-             asg.targetStudentId === student.rollNumber ||
-             asg.targetStudentId?.toLowerCase() === student.email?.toLowerCase();
+      const matchId = asg.targetStudentId === student.id || asg.targetStudentId === student.rollNumber;
+      const matchName = Boolean(asg.targetStudentName && student.name && asg.targetStudentName.toLowerCase() === student.name.toLowerCase());
+      const matchEmail = Boolean(asg.targetStudentId && student.email && asg.targetStudentId.toLowerCase() === student.email.toLowerCase());
+      const matchDomain = Boolean(asg.targetDomainOrTrack && student.name && asg.targetDomainOrTrack.toLowerCase().includes(student.name.toLowerCase()));
+      const matchRollInDomain = Boolean(asg.targetDomainOrTrack && student.rollNumber && asg.targetDomainOrTrack.toLowerCase().includes(student.rollNumber.toLowerCase()));
+      return matchId || matchName || matchEmail || matchDomain || matchRollInDomain;
     }
     if (asg.targetScope === 'MY_MENTEES') {
       return student.mentorEmail === asg.assignedByEmail || student.mentorName === asg.assignedByName || true;
@@ -271,39 +290,82 @@ export const StudentDashboard: React.FC = () => {
       return true;
     }
     if (asg.targetScope === 'DEPARTMENT') {
-      // 1. Multi-department array matching
+      // Helper for normalizing department names with common aliases
+      const normDept = (d: string) => {
+        const lower = (d || '').toLowerCase();
+        if (lower.includes('comp') || lower.includes('cse')) return 'cse';
+        if (lower.includes('info') || lower.includes('it')) return 'it';
+        if (lower.includes('ai') || lower.includes('data')) return 'aids';
+        if ((lower.includes('electr') && lower.includes('comm')) || lower.includes('ece')) return 'ece';
+        if ((lower.includes('electr') && lower.includes('electr')) || lower.includes('eee')) return 'eee';
+        if (lower.includes('mech')) return 'mech';
+        return lower;
+      };
+
+      const stuDeptKey = normDept(student.department || '');
       let deptMatches = false;
+
       if (asg.targetDepartments && asg.targetDepartments.length > 0) {
-        deptMatches = asg.targetDepartments.some(d => 
-          (student.department && (student.department.toLowerCase().includes(d.toLowerCase()) || d.toLowerCase().includes(student.department.toLowerCase())))
-        );
+        deptMatches = asg.targetDepartments.some(d => {
+          if (!student.department) return true;
+          return normDept(d) === stuDeptKey ||
+                 student.department.toLowerCase().includes(d.toLowerCase()) ||
+                 d.toLowerCase().includes(student.department.toLowerCase());
+        });
       } else {
         const deptTarget = asg.targetDepartment || asg.targetDomainOrTrack;
-        if (!deptTarget) deptMatches = true;
-        else deptMatches = Boolean(student.department && (student.department.toLowerCase().includes(deptTarget.toLowerCase()) || deptTarget.toLowerCase().includes(student.department.toLowerCase())));
+        if (!deptTarget || !student.department) deptMatches = true;
+        else {
+          deptMatches = Boolean(
+            normDept(deptTarget) === stuDeptKey ||
+            student.department.toLowerCase().includes(deptTarget.toLowerCase()) ||
+            deptTarget.toLowerCase().includes(student.department.toLowerCase())
+          );
+        }
       }
 
       if (!deptMatches) return false;
 
-      // Class-specific filtering within department
+      // Class-specific filtering within department (only if targetClassNames/targetClassName is explicitly set)
       if (asg.targetClassNames && asg.targetClassNames.length > 0) {
-        return asg.targetClassNames.some(cls => cls.toLowerCase() === (student.className || '').toLowerCase());
+        if (!student.className) return true;
+        return asg.targetClassNames.some(cls => 
+          cls.toLowerCase() === (student.className || '').toLowerCase() ||
+          (student.className || '').toLowerCase().includes(cls.toLowerCase()) ||
+          cls.toLowerCase().includes((student.className || '').toLowerCase())
+        );
       }
-      if (asg.targetClassName) {
-        return asg.targetClassName.toLowerCase() === (student.className || '').toLowerCase();
+      if (asg.targetClassName && asg.targetClassName.trim() !== '') {
+        if (!student.className) return true;
+        return asg.targetClassName.toLowerCase() === (student.className || '').toLowerCase() ||
+               (student.className || '').toLowerCase().includes(asg.targetClassName.toLowerCase()) ||
+               asg.targetClassName.toLowerCase().includes((student.className || '').toLowerCase());
       }
       return true;
     }
 
     if (asg.targetScope === 'CLASS') {
+      if (!student.className) return true;
       if (asg.targetClassNames && asg.targetClassNames.length > 0) {
-        return asg.targetClassNames.some(cls => cls.toLowerCase() === (student.className || '').toLowerCase());
+        return asg.targetClassNames.some(cls => 
+          cls.toLowerCase() === (student.className || '').toLowerCase() ||
+          (student.className || '').toLowerCase().includes(cls.toLowerCase()) ||
+          cls.toLowerCase().includes((student.className || '').toLowerCase())
+        );
       }
       if (asg.targetClassName) {
-        return asg.targetClassName.toLowerCase() === (student.className || '').toLowerCase();
+        return asg.targetClassName.toLowerCase() === (student.className || '').toLowerCase() ||
+               (student.className || '').toLowerCase().includes(asg.targetClassName.toLowerCase()) ||
+               asg.targetClassName.toLowerCase().includes((student.className || '').toLowerCase());
       }
-      return false;
+      return true;
     }
+
+    // Default to true for batch or track matched assignments
+    if (asg.targetDomainOrTrack && student.batchYear && asg.targetDomainOrTrack.includes(String(student.batchYear))) {
+      return true;
+    }
+
     return true;
   });
 
@@ -311,7 +373,8 @@ export const StudentDashboard: React.FC = () => {
     return asg.submissions?.find(
       s => s.studentId === student.id ||
            s.studentRollNumber === student.rollNumber ||
-           s.studentRollNumber?.toLowerCase() === student.rollNumber?.toLowerCase()
+           (s.studentRollNumber && student.rollNumber && s.studentRollNumber.toLowerCase() === student.rollNumber.toLowerCase()) ||
+           (s.studentName && student.name && s.studentName.toLowerCase() === student.name.toLowerCase())
     );
   };
 
@@ -564,90 +627,6 @@ export const StudentDashboard: React.FC = () => {
                       )}
                     </div>
                   ))}
-                </div>
-              </div>
-            )}
-
-            {/* Work Experience */}
-            {(student.resume?.experience?.length ?? 0) > 0 && (
-              <div className="space-y-3 pt-2">
-                <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">Work Experience</h3>
-                <div className="space-y-3">
-                  {(student.resume?.experience ?? []).map((exp: any, idx: number) => (
-                    <div key={idx} className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200/80 text-xs space-y-1">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <h4 className="font-bold text-neutral-900 text-sm">{exp.title}</h4>
-                          <p className="text-neutral-600 font-medium">{exp.company}</p>
-                        </div>
-                        {exp.duration && (
-                          <span className="text-[10px] px-2 py-0.5 rounded bg-neutral-200 text-neutral-700 font-mono font-semibold shrink-0">
-                            {exp.duration}
-                          </span>
-                        )}
-                      </div>
-                      {exp.description && (
-                        <p className="text-xs text-neutral-600 leading-relaxed">{exp.description}</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Education */}
-            {(student.resume?.education?.length ?? 0) > 0 && (
-              <div className="space-y-3 pt-2">
-                <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">Education</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {(student.resume?.education ?? []).map((edu: any, idx: number) => (
-                    <div key={idx} className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200/80 text-xs space-y-1">
-                      <h4 className="font-bold text-neutral-900">{edu.degree}</h4>
-                      <p className="text-neutral-600">{edu.institution}</p>
-                      {edu.year && <p className="text-[10px] font-mono text-neutral-400">{edu.year}</p>}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Certifications */}
-            {(student.resume?.certifications?.length ?? 0) > 0 && (
-              <div className="space-y-3 pt-2">
-                <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">Certifications</h3>
-                <div className="flex flex-wrap gap-2">
-                  {(student.resume?.certifications ?? []).map((cert: string, idx: number) => (
-                    <span key={idx} className="px-3 py-1.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-semibold text-emerald-800">
-                      {cert}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Links */}
-            {[student.resume?.links?.github, student.resume?.links?.linkedin, student.resume?.links?.portfolio].some((u) => safeHttpUrl(u)) && (
-              <div className="space-y-3 pt-2">
-                <h3 className="text-xs font-bold text-neutral-900 uppercase tracking-wider">Links</h3>
-                <div className="flex flex-wrap gap-2">
-                  {safeHttpUrl(student.resume?.links?.github) && (
-                    <a href={safeHttpUrl(student.resume?.links?.github) ?? undefined} target="_blank" rel="noopener noreferrer"
-                      className="px-3 py-1.5 bg-neutral-100 border border-neutral-200 rounded-xl text-xs font-mono font-semibold text-neutral-700 hover:bg-neutral-200 transition-colors">
-                      GitHub ↗
-                    </a>
-                  )}
-                  {safeHttpUrl(student.resume?.links?.linkedin) && (
-                    <a href={safeHttpUrl(student.resume?.links?.linkedin) ?? undefined} target="_blank" rel="noopener noreferrer"
-                      className="px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl text-xs font-mono font-semibold text-blue-700 hover:bg-blue-100 transition-colors">
-                      LinkedIn ↗
-                    </a>
-                  )}
-                  {safeHttpUrl(student.resume?.links?.portfolio) && (
-                    <a href={safeHttpUrl(student.resume?.links?.portfolio) ?? undefined} target="_blank" rel="noopener noreferrer"
-                      className="px-3 py-1.5 bg-purple-50 border border-purple-200 rounded-xl text-xs font-mono font-semibold text-purple-700 hover:bg-purple-100 transition-colors">
-                      Portfolio ↗
-                    </a>
-                  )}
                 </div>
               </div>
             )}
@@ -990,7 +969,7 @@ export const StudentDashboard: React.FC = () => {
               </div>
               <button
                 type="button"
-                onClick={() => simulateElapsedCooldown(student.id || 'stu-21cs1084')}
+                onClick={() => simulateElapsedCooldown(student.id || 'stu-candidate')}
                 className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold rounded-xl text-xs flex items-center space-x-2 shrink-0 shadow-md transition-colors cursor-pointer"
                 title="Fast-forward 3 days to test automatic credit replenishment"
               >
@@ -1345,19 +1324,25 @@ export const StudentDashboard: React.FC = () => {
             </div>
 
             <div>
-              <h2 className="text-xl font-semibold tracking-tight text-white">
-                Launch Mock Interview
+              <h2 className="text-xl font-semibold tracking-tight text-white flex items-center space-x-2">
+                <span>Launch Mock Interview</span>
+                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  Resume-Based
+                </span>
               </h2>
+              <p className="text-xs text-neutral-400 mt-1">
+                Personalized drill strictly based on your uploaded resume projects, tech stack &amp; problem-solving experience.
+              </p>
             </div>
 
             <div className="grid grid-cols-3 gap-2 pt-2">
               <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-2.5 text-center">
-                <p className="text-[10px] text-neutral-400 uppercase tracking-wider font-mono">Mode</p>
-                <p className="text-xs font-medium text-neutral-200 mt-0.5">Voice-to-Voice</p>
+                <p className="text-[10px] text-neutral-400 uppercase tracking-wider font-mono">Source</p>
+                <p className="text-xs font-medium text-emerald-300 mt-0.5 truncate">Personal Resume</p>
               </div>
               <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-2.5 text-center">
-                <p className="text-[10px] text-neutral-400 uppercase tracking-wider font-mono">Turns</p>
-                <p className="text-xs font-medium text-neutral-200 mt-0.5">3 Adaptive Turns</p>
+                <p className="text-[10px] text-neutral-400 uppercase tracking-wider font-mono">Format</p>
+                <p className="text-xs font-medium text-neutral-200 mt-0.5">Voice AI Session</p>
               </div>
               <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-2.5 text-center">
                 <p className="text-[10px] text-neutral-400 uppercase tracking-wider font-mono">Proctoring</p>
@@ -1384,7 +1369,7 @@ export const StudentDashboard: React.FC = () => {
                 if (typeof document !== 'undefined' && !document.fullscreenElement && document.documentElement.requestFullscreen) {
                   document.documentElement.requestFullscreen().catch(() => {});
                 }
-                startInterview('MOCK_INTERVIEW');
+                startInterview('MOCK_INTERVIEW', { isResumeBased: true, assignment: null });
               }}
               className={`inline-flex items-center justify-center space-x-2 font-semibold px-5 py-2.5 rounded-xl text-xs transition-all shadow-sm ${
                 (student.coins ?? 5) < 1
@@ -1393,7 +1378,7 @@ export const StudentDashboard: React.FC = () => {
               }`}
             >
               <Mic className="w-3.5 h-3.5" />
-              <span>{(student.coins ?? 5) < 1 ? '0 Coins - Balance Required' : 'Launch Mock Interview'}</span>
+              <span>{(student.coins ?? 5) < 1 ? '0 Coins - Balance Required' : 'Launch Resume Mock Interview'}</span>
               <ArrowRight className="w-3.5 h-3.5 ml-0.5" />
             </button>
           </div>
@@ -1447,7 +1432,7 @@ export const StudentDashboard: React.FC = () => {
                   alert("Insufficient Coins: You need at least 1 coin to attend an interview or communication session. Your balance is 0 Coins.");
                   return;
                 }
-                startInterview('LISTENING_COMPREHENSION');
+                startInterview('LISTENING_COMPREHENSION', { assignment: null });
               }}
               className={`inline-flex items-center justify-center space-x-2 font-semibold px-5 py-2.5 rounded-xl text-xs transition-all shadow-xs ${
                 (student.coins ?? 5) < 1

@@ -54,6 +54,8 @@ export interface InterviewState {
   resume_topics_asked?: string[];
   follow_ups_in_a_row?: number;
   current_question_source?: QuestionSource;
+  // Set when an assignment fixes the interview topic; questions then stay on it
+  assigned_topic?: string;
 }
 
 export type QuestionSource = 'introduction' | 'resume' | 'follow_up' | 'fallback';

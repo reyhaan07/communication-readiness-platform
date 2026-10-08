@@ -165,15 +165,10 @@ export const ProgramAdminPortal: React.FC = () => {
   const loadPortalData = async () => {
     try {
       setLoading(true);
-
       const [progs, mList, sList] = await Promise.all([
         api.college.getPrograms(currentUser?.collegeId || 'col-1'),
-        api.admin.getUsers({ role: 'FACULTY_MENTOR' }).then(users =>
-          users.length > 0 ? users : api.admin.getFacultyMentors()
-        ).catch(() => api.admin.getFacultyMentors()),
-        api.admin.getUsers({ role: 'STUDENT' }).then(users =>
-          users.length > 0 ? users : api.admin.getStudents()
-        ).catch(() => api.admin.getStudents())
+        api.admin.getFacultyMentors(),
+        api.admin.getStudents()
       ]);
       if (progs) {
         setPrograms(progs);

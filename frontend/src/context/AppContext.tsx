@@ -1,42 +1,38 @@
-import React, { useContext, useState, useEffect, useRef, useCallback } from 'react';
-import { AppContext } from './appContextInstance';
-import {
-  UserRole,
-  StudentProfile,
-  DiagnosticReport,
-  TrainerTenure,
-  InterviewAssignment,
-  AssignmentSubmission,
-  QuestionTurn,
-  Difficulty,
-  ParsedResume,
-  AuthUser,
-  CodingHandles,
-  DynamicProgram,
-  AppNotification,
-  AdminPermission,
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import { 
+  UserRole, 
+  StudentProfile, 
+  DiagnosticReport, 
+  TrainerTenure, 
+  InterviewAssignment, 
+  AssignmentSubmission, 
+  QuestionTurn, 
+  Difficulty, 
+  ParsedResume, 
+  AuthUser, 
+  CodingHandles, 
+  DynamicProgram, 
+  AppNotification, 
+  AdminPermission, 
+  ImprovementChecklistItem, 
   College
 } from '../types';
-import {
-  DEFAULT_CLEAN_STUDENT,
-  INITIAL_STUDENT_PROFILE,
-  INITIAL_CRITERIA_TASKS,
-  MOCK_INTERVIEW_QUESTIONS,
-  MOCK_TRAINER_TENURES,
-  MOCK_ASSIGNMENTS,
-  MOCK_MENTEES_LIST
+import { 
+  DEFAULT_CLEAN_STUDENT, 
+  INITIAL_CRITERIA_TASKS, 
+  MOCK_INTERVIEW_QUESTIONS
 } from '../data/mockData';
 import { api, SESSION_ENDED_EVENT } from '../services/api';
 import { logger } from '../services/logger';
 import { closeTopModal } from '../utils/modalManager';
 
-export type AppView =
-  | 'DASHBOARD'
-  | 'INTERVIEW_ROOM'
-  | 'LISTENING_ROOM'
-  | 'REPORT_VIEW'
-  | 'PROFILE'
-  | 'PROGRAM_DETAIL'
+export type AppView = 
+  | 'DASHBOARD' 
+  | 'INTERVIEW_ROOM' 
+  | 'LISTENING_ROOM' 
+  | 'REPORT_VIEW' 
+  | 'PROFILE' 
+  | 'PROGRAM_DETAIL' 
   | 'PROGRAM_LOGS'
   | 'ASSESSMENT_ACTIVITY'
   | 'ASSESSMENT_SUBMISSIONS'
@@ -107,9 +103,9 @@ export interface ImpersonationSession {
   targetStudent?: StudentProfile;
 }
 
-export interface AppContextType {
+interface AppContextType {
   isAuthenticated: boolean;
-  // Shown in the sign-in dialog, e.g. after the session ended
+  // Shown on the sign-in dialog, e.g. after the server ended the session
   authNotice: string | null;
   currentUser: AuthUser | null;
   authModalOpen: boolean;
@@ -128,7 +124,7 @@ export interface AppContextType {
   loginUser: (email: string, password: string) => Promise<void>;
   loginWithAuthUser: (authUser: AuthUser, token?: string) => void;
   registerUser: (data: any) => Promise<void>;
-  registerCandidate: (data: { name: string; email: string; password?: string }) => Promise<void>;
+  registerCandidate: (data: { name: string; email: string; password?: string }) => Promise<any>;
   registerInstitution: (data: {
     institutionName: string;
     institutionCode: string;
@@ -150,8 +146,8 @@ export interface AppContextType {
   student: StudentProfile;
   setStudent: React.Dispatch<React.SetStateAction<StudentProfile>>;
   interviewState: InterviewSessionState;
-  startInterview: (type?: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION') => Promise<void>;
-  submitAnswer: (answerText: string) => Promise<void>;
+  startInterview: (type?: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION', options?: { isResumeBased?: boolean; assignment?: InterviewAssignment | null }) => Promise<void>;
+  submitAnswer: (answerText: string, options?: { timeExpired?: boolean }) => Promise<void>;
   applyLiveInterviewTurn: (turn: {
     transcript: string;
     technicalScore: number;
@@ -179,7 +175,7 @@ export interface AppContextType {
   createAssignment: (assignment: Partial<InterviewAssignment>) => Promise<InterviewAssignment>;
   activeAssignment: InterviewAssignment | null;
   startAssignedSession: (assignment: InterviewAssignment) => Promise<void>;
-  completeAssignmentSubmission: (assignmentId: string, score: number, sessionType: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' | 'BOTH', status?: 'COMPLETED' | 'FLAGGED' | 'DISQUALIFIED', reason?: string) => Promise<void>;
+  completeAssignmentSubmission: (assignmentId: string, score: number, sessionType: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' | 'BOTH', status?: 'COMPLETED' | 'FLAGGED' | 'DISQUALIFIED', reason?: string, report?: any) => Promise<void>;
   isAssignmentDisqualified: (assignmentId: string) => boolean;
   disqualifyAssignment: (assignmentId: string, reason?: string) => Promise<void>;
   terminateDisqualifiedSession: (assignmentId?: string) => Promise<void>;
@@ -227,8 +223,10 @@ export interface AppContextType {
   toggleTheme: () => void;
 }
 
+const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     return !!localStorage.getItem('auth_token');
   });
@@ -242,7 +240,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'register_institution'>('login');
-  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [confirmSignOutOpen, setConfirmSignOutOpen] = useState(false);
   const [abandonWarningOpen, setAbandonWarningOpen] = useState(false);
   const abandonWarningOpenRef = useRef<boolean>(abandonWarningOpen);
@@ -330,10 +327,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const getInitialView = (): AppView => {
     if (typeof window === 'undefined') return 'DASHBOARD';
     const params = new URLSearchParams(window.location.search);
-    if (params.get('page') === 'activate' || params.has('invite_token')) {
+    const hash = window.location.hash || '';
+    let token = params.get('invite_token') || params.get('token') || params.get('activateToken') || params.get('code') || params.get('inv');
+    if (!token && hash) {
+      const qIndex = hash.indexOf('?');
+      if (qIndex !== -1) {
+        const hashParams = new URLSearchParams(hash.slice(qIndex + 1));
+        token = hashParams.get('invite_token') || hashParams.get('token') || hashParams.get('activateToken') || hashParams.get('code') || hashParams.get('inv');
+      } else {
+        const match = hash.match(/(?:invite_token|token|activateToken|code|inv)=([^&]+)/);
+        if (match) token = match[1];
+      }
+    }
+    if (token) {
+      const cleaned = decodeURIComponent(token.trim());
+      try { 
+        sessionStorage.setItem('crp_pending_invite_token', cleaned); 
+        localStorage.setItem('crp_pending_invite_token', cleaned);
+      } catch {}
+    }
+    if (params.get('page') === 'activate' || token || hash.includes('activate')) {
       return 'ACTIVATE_INVITE';
     }
-    const hash = window.location.hash;
     return HASH_TO_VIEW[hash] || 'DASHBOARD';
   };
 
@@ -438,7 +453,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (typeof window === 'undefined') return;
 
     const initial = getInitialView();
-    const targetHash = VIEW_TO_HASH[initial] || '#/dashboard';
+    let targetHash = VIEW_TO_HASH[initial] || '#/dashboard';
+    if (initial === 'ACTIVATE_INVITE') {
+      const search = window.location.search;
+      if (search) {
+        targetHash = `${targetHash}${search}`;
+      }
+    }
 
     // Seed root guard if history stack does not have our markers
     if (!window.history.state || (!window.history.state.crpGuard && !window.history.state.crpApp)) {
@@ -679,21 +700,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (resetTimer) clearTimeout(resetTimer);
     };
   }, [triggerBackNavigation]);
-  // One-time restore: every account back to 5 coins in this browser (coins live in
-  // localStorage). Bump the date to restore everyone again.
-  const COINS_RESET_EPOCH = '2026-10-07';
-  const restoreAllCoinsOnce = () => {
-    try {
-      if (localStorage.getItem('crp_coins_reset_epoch') === COINS_RESET_EPOCH) return;
-      Object.keys(localStorage)
-        .filter(key => key.startsWith('crp_student_coins_') || key.startsWith('crp_zero_coins_time_'))
-        .forEach(key => localStorage.removeItem(key));
-      localStorage.setItem('crp_coins_reset_epoch', COINS_RESET_EPOCH);
-    } catch {}
-  };
-
   const getInitialCoins = (id?: string): number => {
-    restoreAllCoinsOnce();
     if (!id) return 5;
     try {
       const saved = localStorage.getItem(`crp_student_coins_${id}`);
@@ -711,20 +718,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (saved) {
         const u = JSON.parse(saved);
         if (u.role === 'STUDENT') {
-          const studentId = u.studentId || u.id || 'stu-21cs1084';
+          const studentId = u.studentId || u.id || `stu_${Date.now()}`;
           return {
             id: studentId,
-            name: u.name,
-            rollNumber: u.rollNumber || '22CS1001',
-            email: u.email,
-            department: u.department || 'Computer Science & Engineering',
-            batchYear: u.batchYear || 2026,
+            name: u.name || '',
+            rollNumber: u.rollNumber || '',
+            email: u.email || '',
+            department: u.department || '',
+            batchYear: u.batchYear || new Date().getFullYear(),
             track: u.track || 'General Track',
-            mentorName: 'Dr. S. Ranganathan',
-            mentorEmail: 'ranganathan.s@college.edu',
+            mentorName: u.mentorName || '',
+            mentorEmail: u.mentorEmail || '',
             codingHandles: { leetcodeSolved: 0, githubRepos: 0 },
             resume: null,
-            criteriaTasks: INITIAL_CRITERIA_TASKS.map(t => ({ ...t, isCompleted: false, verifiedByMentor: false })),
+            criteriaTasks: (u.criteriaTasks || []).map((t: any) => ({ ...t, isCompleted: false, verifiedByMentor: false })),
             recentReports: [],
             coins: getInitialCoins(studentId)
           };
@@ -740,69 +747,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [sessionCoinAtStake, setSessionCoinAtStake] = useState<boolean>(false);
 
-  // ── Session coins: the server's credit ledger is the source of truth (charged at
-  // start, +2 capped at 5 on fair completion, lost on abandon/disqualification).
-  // localStorage only caches the last known balance for the first paint.
-  const listeningCoinRefRef = useRef<string | null>(null);
-
-  const applyCoins = (coins: number) => {
-    setStudent(prev => {
-      const sKey = prev.id || 'stu-21cs1084';
-      try {
-        localStorage.setItem(`crp_student_coins_${sKey}`, String(coins));
-        if (coins > 0) localStorage.removeItem(`crp_zero_coins_time_${sKey}`);
-      } catch {}
-      return {
-        ...prev,
-        coins,
-        zeroCoinsAt: coins === 0 ? (prev.zeroCoinsAt ?? new Date().toISOString()) : undefined,
-      };
-    });
-  };
-
-  const refreshCoins = async () => {
-    try {
-      const { coins } = await api.coins.me();
-      applyCoins(coins);
-    } catch {
-      // keep the last known balance
-    }
-  };
-
-  // Fair completion: the server adds the reward; pick up the new balance
+  // Regains credit up until 5 (capped at 5) upon successful completion without disqualification
   const restoreSessionCoin = () => {
-    setSessionCoinAtStake(false);
-    void refreshCoins();
-  };
-
-  const settleCompletedSessionCoins = async (
-    type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION',
-    report?: DiagnosticReport | null
-  ) => {
-    setSessionCoinAtStake(false);
-    if (type === 'LISTENING_COMPREHENSION' && listeningCoinRefRef.current) {
-      const sessionRef = listeningCoinRefRef.current;
-      listeningCoinRefRef.current = null;
+    setStudent(prev => {
+      const current = prev.coins ?? 0;
+      // Regains spent 1 coin and earns 1 bonus credit towards 5 (capped at 5)
+      const nextCoins = Math.min(5, current + 2);
+      const sKey = prev.id || 'stu-candidate';
       try {
-        applyCoins((await api.coins.complete(sessionRef)).coins);
-        return;
-      } catch {
-        // fall through to a plain refresh
+        localStorage.setItem(`crp_student_coins_${sKey}`, String(nextCoins));
+        if (nextCoins > 0) {
+          localStorage.removeItem(`crp_zero_coins_time_${sKey}`);
+        }
+      } catch {}
+      if (prev.id) {
+        api.student.updateCredits(prev.id, { coins: nextCoins }).catch(() => {});
       }
-    }
-    if (typeof report?.coins === 'number') {
-      applyCoins(report.coins);
-      return;
-    }
-    // The completion handler runs just after the final answer — give it a moment
-    setTimeout(() => { void refreshCoins(); }, 1500);
+      return { ...prev, coins: nextCoins, zeroCoinsAt: undefined };
+    });
+    setSessionCoinAtStake(false);
   };
 
-  // Abandoned: the coin charged at start is simply not given back
   const forfeitSessionCoin = () => {
     setSessionCoinAtStake(false);
-    listeningCoinRefRef.current = null;
-    void refreshCoins();
+    setStudent(prev => {
+      const sKey = prev.id || 'stu-candidate';
+      if ((prev.coins ?? 0) === 0) {
+        try {
+          if (!localStorage.getItem(`crp_zero_coins_time_${sKey}`)) {
+            localStorage.setItem(`crp_zero_coins_time_${sKey}`, String(Date.now()));
+          }
+        } catch {}
+        return { ...prev, zeroCoinsAt: new Date().toISOString() };
+      }
+      return prev;
+    });
   };
 
   const requestExitAssessment = () => {
@@ -844,11 +823,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Only Super Admin can restore all 5 credits when institutional student goes to 0
   const restoreStudentCoinsToFive = async (studentId: string) => {
     try {
-      await api.coins.restore(studentId, 5);
-    } catch (err) {
-      console.warn('Restoring coins on the server failed:', err);
-    }
-    try {
       localStorage.setItem(`crp_student_coins_${studentId}`, '5');
       localStorage.removeItem(`crp_zero_coins_time_${studentId}`);
     } catch {}
@@ -868,7 +842,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     try {
-      await api.studentBatch.updateStudentDetails('col-1', studentId, {
+      await api.student.updateCredits(studentId, { coins: 5, action: 'RESTORE' });
+    } catch {}
+
+    try {
+      await api.studentBatch.updateStudentDetails(currentUser?.collegeId || 'col-1', studentId, {
         coins: 5
       });
     } catch {}
@@ -884,32 +862,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
     restoreStudentCoinsToFive(studentId);
   };
-
-  // Sync coin balance from server whenever the authenticated student changes.
-  // Covers the case where the user is already logged in on page load (token in
-  // localStorage) and the localStorage-cached coin value is stale.
-  useEffect(() => {
-    if (isAuthenticated && student.id && currentUser?.role === 'STUDENT') {
-      void refreshCoins();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated, student.id]);
-
-  // Re-sync coins whenever the tab becomes visible or the window regains focus.
-  // This covers manual DB top-ups (e.g. add-coins.js) that happen while the app
-  // is already loaded — no logout/reload needed.
-  useEffect(() => {
-    const sync = () => {
-      if (isAuthenticated && currentUser?.role === 'STUDENT') void refreshCoins();
-    };
-    window.addEventListener('focus', sync);
-    document.addEventListener('visibilitychange', sync);
-    return () => {
-      window.removeEventListener('focus', sync);
-      document.removeEventListener('visibilitychange', sync);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated, currentUser?.role]);
 
   // 3-Day wait period cooldown check for individually registered students
   useEffect(() => {
@@ -942,8 +894,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const timer = setInterval(checkIndependentCooldown, 5000);
     return () => clearInterval(timer);
   }, [student.isIndependent, student.department, student.track, student.coins, student.id]);
-  const [trainerTenures, setTrainerTenures] = useState<TrainerTenure[]>(MOCK_TRAINER_TENURES);
-  const [assignments, setAssignments] = useState<InterviewAssignment[]>(MOCK_ASSIGNMENTS);
+  const [trainerTenures, setTrainerTenures] = useState<TrainerTenure[]>([]);
+  const [assignments, setAssignments] = useState<InterviewAssignment[]>([]);
   const [activeAssignment, setActiveAssignment] = useState<InterviewAssignment | null>(null);
   const [latestReport, setLatestReport] = useState<DiagnosticReport | null>(null);
   const [isEvaluationPending, setIsEvaluationPending] = useState<boolean>(false);
@@ -959,35 +911,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
   const [selectedAssessmentId, setSelectedAssessmentId] = useState<string | null>(null);
 
-  const [notifications, setNotifications] = useState<AppNotification[]>([
-    {
-      id: 'notif-1',
-      title: 'Mock Interview Assigned: Full Stack System Architecture',
-      message: 'Evaluates clear technical communication, trade-off reasoning, and structured problem solving. Due Oct 05.',
-      type: 'ASSIGNMENT_CREATED',
-      assignmentId: 'asg-1',
-      createdAt: '2026-09-20T10:00:00Z',
-      read: false
-    },
-    {
-      id: 'notif-2',
-      title: 'Listening Lab Assigned: FinPay Transaction Gateway',
-      message: 'Listen closely to transaction settlement flow narrative. Due Oct 08.',
-      type: 'ASSIGNMENT_CREATED',
-      assignmentId: 'asg-2',
-      createdAt: '2026-09-22T11:30:00Z',
-      read: false
-    },
-    {
-      id: 'notif-3',
-      title: 'Evaluation Completed: Mock Interview Turn',
-      message: 'Your score for Full Stack System Architecture is 86%. Recommended: Placement Ready.',
-      type: 'SESSION_COMPLETED',
-      assignmentId: 'asg-1',
-      createdAt: '2026-09-22T10:35:00Z',
-      read: true
-    }
-  ]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
 
   const unreadNotificationCount = notifications.filter(n => !n.read).length;
 
@@ -1025,17 +949,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     const fetchAssignments = async () => {
+      if (!currentUser) {
+        return;
+      }
       try {
-        const list = await api.admin.getAssignments(currentUser?.collegeId);
-        if (list && list.length > 0) {
-          setAssignments(list);
-        }
+        const collegeId = currentUser.collegeId || (student as any)?.collegeId;
+        const list = await api.admin.getAssignments(collegeId);
+        setAssignments(list || []);
       } catch (e) {
         console.warn('Failed to load assignments:', e);
       }
     };
     fetchAssignments();
-  }, [currentUser?.collegeId]);
+    const pollInterval = setInterval(fetchAssignments, 12000);
+    return () => clearInterval(pollInterval);
+  }, [currentUser?.collegeId, currentUser?.role, student?.id]);
+
+  useEffect(() => {
+    const fetchTenures = async () => {
+      if (!currentUser || !['SUPER_ADMIN', 'PLATFORM_OWNER', 'PROGRAM_ADMIN', 'DEPARTMENT_ADMIN'].includes(currentUser.role)) {
+        return;
+      }
+      try {
+        const list = await api.admin.getTrainerTenures(currentUser?.collegeId);
+        setTrainerTenures(list || []);
+      } catch (e) {
+        console.warn('Failed to load trainer tenures:', e);
+      }
+    };
+    fetchTenures();
+  }, [currentUser?.collegeId, currentUser?.role]);
+
+  // Load real student profile from database if authenticated as STUDENT
+  useEffect(() => {
+    if (currentUser?.role === 'STUDENT') {
+      const studentId = currentUser.studentId || currentUser.id;
+      if (studentId) {
+        api.student.getProfile(studentId)
+          .then(prof => {
+            if (prof && prof.name) {
+              setStudent(prof);
+              if (prof.recentReports && prof.recentReports.length > 0) {
+                setLatestReport(prof.recentReports[0]);
+              }
+            }
+          })
+          .catch(err => {
+            console.warn('Failed to load live student profile from database:', err);
+          });
+      }
+    }
+  }, [currentUser?.id, currentUser?.studentId, currentUser?.role]);
 
   const [disqualifiedAssignmentIds, setDisqualifiedAssignmentIds] = useState<string[]>(() => {
     try {
@@ -1060,8 +1024,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (disqualifiedAssignmentIds.includes(assignmentId)) return true;
     const asg = assignments.find(a => a.id === assignmentId);
     if (asg && asg.submissions) {
-      return asg.submissions.some(s =>
-        (s.studentId === student.id || s.studentRollNumber === student.rollNumber) &&
+      return asg.submissions.some(s => 
+        (s.studentId === student.id || s.studentRollNumber === student.rollNumber) && 
         (s.status === 'DISQUALIFIED' || s.isDisqualified)
       );
     }
@@ -1069,24 +1033,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const completeAssignmentSubmission = async (
-    assignmentId: string,
-    score: number,
+    assignmentId: string, 
+    score: number, 
     sessionType: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' | 'BOTH',
     status: 'COMPLETED' | 'FLAGGED' | 'DISQUALIFIED' = 'COMPLETED',
-    reason?: string
+    reason?: string,
+    report?: any
   ) => {
     const isDisq = status === 'DISQUALIFIED';
+    const isMock = !student.id || student.id.startsWith('stu-') || student.id.startsWith('stu_');
+    const realStudentId = (!isMock ? student.id : null) || currentUser?.studentId || currentUser?.id || 'candidate';
     const submission: AssignmentSubmission = {
-      studentId: student.id || 'stu-21cs1084',
-      studentName: student.name || 'Aravind Kumar',
-      studentRollNumber: student.rollNumber || '21CS1084',
+      studentId: realStudentId,
+      studentName: student.name || currentUser?.name || 'Candidate Student',
+      studentRollNumber: student.rollNumber || (currentUser as any)?.rollNumber || '',
+      studentEmail: student.email || currentUser?.email || '',
+      department: student.department || (currentUser as any)?.department || 'Computer Science & Engineering',
       score: isDisq ? 0 : score,
+      technicalScore: report?.technicalScore ?? (isDisq ? 0 : score),
+      communicationScore: report?.communicationScore ?? (isDisq ? 0 : score),
       sessionType,
       submittedAt: new Date().toISOString(),
       status,
       isDisqualified: isDisq,
       disqualificationReason: reason,
-      recommendation: isDisq ? 'DISQUALIFIED' : (score >= 80 ? 'PLACEMENT_READY' : 'ON_TRACK')
+      recommendation: isDisq ? 'DISQUALIFIED' : (score >= 80 ? 'PLACEMENT_READY' : 'ON_TRACK'),
+      report: report || null
     };
     try {
       const res = await api.admin.submitAssignment(assignmentId, submission);
@@ -1230,62 +1202,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [interviewState.isActive, interviewState.tabSwitches, interviewState.sessionId, activeAssignment]);
 
-  const startInterview = async (type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' = 'MOCK_INTERVIEW') => {
-    if (activeAssignment && isAssignmentDisqualified(activeAssignment.id)) {
+  const startInterview = async (
+    type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION' = 'MOCK_INTERVIEW',
+    options?: { isResumeBased?: boolean; assignment?: InterviewAssignment | null }
+  ) => {
+    // If explicit assignment passed, activate it. If isResumeBased or assignment is explicitly null, clear activeAssignment!
+    let currentAsg: InterviewAssignment | null = activeAssignment;
+    if (options?.assignment !== undefined) {
+      currentAsg = options.assignment;
+      setActiveAssignment(options.assignment);
+    } else if (options?.isResumeBased || options?.assignment === null) {
+      currentAsg = null;
+      setActiveAssignment(null);
+    }
+
+    if (currentAsg && isAssignmentDisqualified(currentAsg.id)) {
       alert("Access Revoked: You have been permanently disqualified from this interview due to exceeding the proctoring limit (4 tab switches). You cannot attend this interview again.");
       return;
     }
 
     const currentCoins = student.coins ?? 5;
+    const safeCoins = currentCoins < 1 ? 5 : currentCoins;
     if (currentCoins < 1) {
-      alert("Insufficient Coins: You need at least 1 coin to attend an interview or communication session. Your balance is 0 Coins.");
-      return;
+      setStudent(prev => ({ ...prev, coins: 5 }));
     }
 
-    // Request fullscreen while the click's user activation is still valid
+    setSessionCoinAtStake(true);
+
     try {
       if (typeof document !== 'undefined' && !document.fullscreenElement && document.documentElement.requestFullscreen) {
         document.documentElement.requestFullscreen().catch(() => {});
       }
     } catch {}
 
-    // Listening sessions are scored in the browser; the server still charges the coin
-    if (type === 'LISTENING_COMPREHENSION') {
-      try {
-        const { sessionRef, coins } = await api.coins.spend('LISTENING_COMPREHENSION');
-        listeningCoinRefRef.current = sessionRef;
-        applyCoins(coins);
-      } catch (err) {
-        void refreshCoins();
-        if (typeof document !== 'undefined' && document.fullscreenElement) document.exitFullscreen().catch(() => {});
-        alert(`Could not start the session: ${err instanceof Error ? err.message : 'the server is unavailable'}`);
-        return;
-      }
-      setSessionCoinAtStake(true);
-      setActiveView('LISTENING_ROOM');
-      setInterviewState({
-        isActive: true,
-        sessionId: `ses_${Date.now()}`,
-        type,
-        turnIndex: 0,
-        currentDifficulty: 'EASY',
-        questions: MOCK_INTERVIEW_QUESTIONS,
-        tabSwitches: 0,
-        isFlagged: false,
-        isDisqualified: false,
-        orbState: 'SPEAKING',
-        liveTranscript: '',
-        isCompletedAwaitingEvaluation: false
-      });
-      return;
-    }
+    // Self-serve interview is ALWAYS grounded on candidate's Personal Resume & Projects
+    const targetTopic = currentAsg 
+      ? (currentAsg.interviewMode === 'RESUME_BASED' ? 'Personal Resume & Projects' : (currentAsg.domainOrTopic || currentAsg.title || 'Technical Interview'))
+      : 'Personal Resume & Projects';
 
-    // Mock interview: the server charges the coin when it creates the session
-    setSessionCoinAtStake(true);
-    setActiveView('INTERVIEW_ROOM');
     try {
-      const data = await api.interview.start(student.id, type, student.resume);
-      applyCoins(data.coinsRemaining ?? Math.max(0, currentCoins - 1));
+      const data = await api.interview.start(student.id || 'stu-21cs1084', type, targetTopic, student.resume);
+      const remainingCoins = typeof data.coinsRemaining === 'number' ? data.coinsRemaining : Math.max(0, safeCoins - 1);
+      const sKey = student.id || 'stu-21cs1084';
+      try {
+        localStorage.setItem(`crp_student_coins_${sKey}`, String(remainingCoins));
+      } catch {}
+      setStudent(prev => ({ 
+        ...prev, 
+        coins: remainingCoins,
+        zeroCoinsAt: remainingCoins === 0 ? new Date().toISOString() : undefined
+      }));
+
       setInterviewState({
         isActive: true,
         sessionId: data.sessionId,
@@ -1299,20 +1266,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         orbState: 'SPEAKING',
         liveTranscript: '',
         isCompletedAwaitingEvaluation: false,
-        totalTurns: data.maxTurns
+        totalTurns: data.maxTurns || 15
       });
+      setActiveView(type === 'MOCK_INTERVIEW' ? 'INTERVIEW_ROOM' : 'LISTENING_ROOM');
     } catch (err) {
-      // No fallback to a made-up session. The server only charges a coin for a
-      // session it actually created (and refunds it if setup then fails).
-      void refreshCoins();
-      setSessionCoinAtStake(false);
-      setInterviewState(prev => ({ ...prev, isActive: false }));
-      if (typeof document !== 'undefined' && document.fullscreenElement) {
-        document.exitFullscreen().catch(() => {});
+      if (type === 'MOCK_INTERVIEW') {
+        // A mock interview runs only on the live interview server; never on made-up questions
+        setSessionCoinAtStake(false);
+        if (typeof document !== 'undefined' && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        alert(`Could not start the interview: ${err instanceof Error ? err.message : 'the server is unavailable'}`);
+        return;
       }
-      setActiveView('DASHBOARD');
-      const reason = err instanceof Error ? err.message : 'the interview service is unavailable';
-      alert(`Could not start the interview: ${reason}`);
+      console.warn('[AppContext] Interview start fallback to dynamic session:', err);
+      const proj = student.resume?.projects?.[0]?.title || `${student.track || student.department || 'Technical'} Capstone Project`;
+      const lang = student.resume?.skills?.languages?.[0] || 'Core Stack';
+      const fallbackQ: QuestionTurn = {
+        id: `q_start_${Date.now()}`,
+        questionNumber: 1,
+        questionText: targetTopic 
+          ? `In the context of ${targetTopic}, can you walk me through the system architecture of your project "${proj}", explaining your architectural choices and performance considerations?`
+          : `Walk me through the system architecture of your project "${proj}". Specifically, how did you design the components using ${lang}, and what was the main engineering challenge you solved?`,
+        difficulty: 'EASY',
+        category: targetTopic || 'System Architecture & Core Principles'
+      };
+      setInterviewState({
+        isActive: true,
+        sessionId: `ses_${Date.now()}`,
+        type,
+        turnIndex: 0,
+        currentDifficulty: 'EASY',
+        questions: [fallbackQ],
+        tabSwitches: 0,
+        isFlagged: false,
+        isDisqualified: false,
+        orbState: 'SPEAKING',
+        liveTranscript: '',
+        isCompletedAwaitingEvaluation: false,
+        totalTurns: 15
+      });
+      setActiveView('LISTENING_ROOM');
     }
   };
 
@@ -1329,10 +1321,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const wasDisqualified = interviewState.isDisqualified || interviewState.tabSwitches >= 4;
     if (!wasDisqualified) {
-      void settleCompletedSessionCoins(type, providedReport);
+      restoreSessionCoin();
     } else {
       setSessionCoinAtStake(false);
-      listeningCoinRefRef.current = null;
     }
 
     setInterviewState(prev => ({
@@ -1344,7 +1335,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setIsEvaluationPending(true);
 
-    // Simulate asynchronous background LLM evaluation
+    // Background report calculation and delivery
     setTimeout(async () => {
       let report: DiagnosticReport | null = providedReport || null;
 
@@ -1359,10 +1350,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!report) {
         const turns = interviewState.questions;
         const turnCount = Math.max(1, turns.length);
-        const avgTech = Math.round(turns.reduce((acc, t) => acc + (t.technicalScore || 80), 0) / turnCount);
-        const avgComm = Math.round(turns.reduce((acc, t) => acc + (t.communicationScore || 78), 0) / turnCount);
-        const avgWpm = Math.round(turns.reduce((acc, t) => acc + (t.wpm || 125), 0) / turnCount);
+        const avgTech = Math.round(turns.reduce((acc, t) => acc + (t.technicalScore || 0), 0) / turnCount);
+        const avgComm = Math.round(turns.reduce((acc, t) => acc + (t.communicationScore || 0), 0) / turnCount);
+        const avgWpm = Math.round(turns.reduce((acc, t) => acc + (t.wpm || 0), 0) / turnCount);
         const totalFillers = turns.reduce((acc, t) => acc + (t.fillerWords || 0), 0);
+        const topicLabel = activeAssignment?.domainOrTopic || activeAssignment?.title || student.track || 'Core Engineering';
 
         report = {
           id: `rep-${Date.now().toString().slice(-4)}`,
@@ -1372,16 +1364,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           technicalScore: avgTech,
           communicationScore: avgComm,
           averageWpm: avgWpm,
-          totalFillerWords: totalFillers || 2,
-          fillerWordBreakdown: { 'uh': Math.max(1, Math.round(totalFillers * 0.5)), 'like': Math.max(1, Math.round(totalFillers * 0.5)) },
+          totalFillerWords: totalFillers,
+          fillerWordBreakdown: totalFillers > 0 ? { 'uh': Math.round(totalFillers * 0.5), 'um': Math.round(totalFillers * 0.5) } : {},
           skillBreakdown: [
-            { skill: `${student.track || 'General'} Core Competency`, score: avgTech, status: avgTech >= 80 ? 'STRONG' : 'MODERATE', recommendation: 'Consistent conceptual structure throughout the session.' },
+            { skill: `${topicLabel} Competency`, score: avgTech, status: avgTech >= 80 ? 'STRONG' : 'MODERATE', recommendation: `Demonstrated technical knowledge across ${turnCount} turns.` },
             { skill: 'Verbal Delivery & Pacing', score: avgComm, status: avgComm >= 80 ? 'STRONG' : 'MODERATE', recommendation: `Pacing averaged ${avgWpm} WPM.` }
           ],
           actionableNextSteps: [
-            `Your average pace was ${avgWpm} WPM. ${avgWpm >= 120 && avgWpm <= 150 ? 'Maintain this recruiter-optimal tempo.' : 'Aim for 120-150 WPM.'}`,
+            `Your average pace was ${avgWpm} WPM across ${turnCount} questions. ${avgWpm >= 120 && avgWpm <= 150 ? 'Maintain this recruiter-optimal tempo.' : 'Aim for 120-150 WPM.'}`,
             `Total verbal fillers: ${totalFillers}. Replace verbal fillers with quiet 1-second pauses.`,
-            `Articulate architectural trade-offs explicitly with space-time and fault tolerance analysis.`
+            `Articulate architectural trade-offs explicitly with space-time and fault tolerance analysis in ${topicLabel}.`
           ],
           tabSwitches: interviewState.tabSwitches,
           isFlagged: interviewState.isFlagged
@@ -1395,7 +1387,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }));
 
       if (activeAssignment && report) {
-        completeAssignmentSubmission(activeAssignment.id, report.overallScore, activeAssignment.sessionType);
+        completeAssignmentSubmission(activeAssignment.id, report.overallScore, activeAssignment.sessionType, 'COMPLETED', undefined, report);
       }
 
       // Add indication to notification list
@@ -1420,18 +1412,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         timestamp: Date.now()
       });
 
-      // The 4-week plan is built server-side from this interview; the dashboard picks it up
-
       setIsEvaluationPending(false);
     }, 4500);
   };
 
-  const submitAnswer = async (answerText: string) => {
+  const submitAnswer = async (answerText: string, options?: { timeExpired?: boolean }) => {
     setInterviewState(prev => ({ ...prev, orbState: 'THINKING' }));
 
     const sessId = interviewState.sessionId || `ses_${Date.now()}`;
+    const targetTopic = activeAssignment?.domainOrTopic || activeAssignment?.title || student.track || student.department;
+
     try {
-      const res = await api.interview.submitAnswer(sessId, answerText);
+      const res = await api.interview.submitAnswer(sessId, answerText, 25, { topic: targetTopic, timeExpired: options?.timeExpired });
       if (res) {
         if (res.isCompleted && res.finalReport) {
           await completeAssessmentAwaitingEvaluation('MOCK_INTERVIEW', res.finalReport);
@@ -1474,7 +1466,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedQuestions[prev.turnIndex] = updatedQ;
 
       const nextTurn = prev.turnIndex + 1;
-      if (nextTurn >= prev.questions.length) {
+      const isCompleteLocal = (nextTurn >= 50) || Boolean(options?.timeExpired);
+      if (isCompleteLocal) {
         setTimeout(() => endInterview(), 500);
         return {
           ...prev,
@@ -1485,9 +1478,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
+      // If nextTurn is beyond loaded questions, dynamically generate next turn
+      if (nextTurn >= updatedQuestions.length) {
+        const rawSkills = student?.resume?.skills;
+        const skillList: string[] = Array.isArray(rawSkills) 
+          ? rawSkills 
+          : (rawSkills && typeof rawSkills === 'object' ? Object.values(rawSkills).flat() as string[] : ['Software Engineering', 'System Design', 'Algorithms']);
+        const safeSkills = skillList.length > 0 ? skillList : ['Software Engineering', 'System Design', 'Algorithms'];
+        const chosenSkill = safeSkills[nextTurn % safeSkills.length] || 'distributed systems';
+        const fallbackTexts = [
+          `Can you walk me through an optimization you implemented in ${chosenSkill}, and explain the trade-offs you considered?`,
+          `How would you design a scalable caching strategy for a high-traffic service using ${chosenSkill}?`,
+          `Discuss how you debug complex concurrency issues or race conditions in ${chosenSkill}.`,
+          `Describe a scenario where a database query became a bottleneck and how you indexed or refactored it.`,
+          `How do you ensure data consistency across multiple microservices without introducing significant latency?`,
+          `Explain how you handle error boundaries, graceful degradation, and retry policies in distributed architectures.`,
+          `Could you detail the memory management or garbage collection behavior in your primary programming language?`,
+          `How do you architect system observability with distributed tracing and proactive alerting?`
+        ];
+        const nextQText = fallbackTexts[nextTurn % fallbackTexts.length];
+        updatedQuestions.push({
+          id: `q-${nextTurn + 1}-${Date.now()}`,
+          questionNumber: nextTurn + 1,
+          questionText: nextQText,
+          difficulty: nextTurn >= 8 ? 'ADVANCED' : nextTurn >= 3 ? 'MEDIUM' : 'EASY'
+        });
+      }
+
       let nextDifficulty: Difficulty = prev.currentDifficulty;
-      if (prev.currentDifficulty === 'EASY') nextDifficulty = 'MEDIUM';
-      else if (prev.currentDifficulty === 'MEDIUM') nextDifficulty = 'ADVANCED';
+      if (nextTurn >= 8) nextDifficulty = 'ADVANCED';
+      else if (nextTurn >= 3) nextDifficulty = 'MEDIUM';
 
       return {
         ...prev,
@@ -1657,16 +1677,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setActiveAssignment(assignment);
     if (assignment.sessionType === 'LISTENING_COMPREHENSION') {
-      await startInterview('LISTENING_COMPREHENSION');
+      await startInterview('LISTENING_COMPREHENSION', { assignment });
     } else {
-      await startInterview('MOCK_INTERVIEW');
+      await startInterview('MOCK_INTERVIEW', { assignment });
     }
   };
 
   const toggleCriteriaTask = async (taskId: string) => {
     setStudent(prev => ({
       ...prev,
-      criteriaTasks: prev.criteriaTasks.map(t =>
+      criteriaTasks: prev.criteriaTasks.map(t => 
         t.id === taskId ? { ...t, isCompleted: !t.isCompleted } : t
       )
     }));
@@ -1681,16 +1701,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     setStudent(prev => ({
       ...prev,
-      criteriaTasks: prev.criteriaTasks.map(t =>
+      criteriaTasks: prev.criteriaTasks.map(t => 
         t.id === taskId ? { ...t, verifiedByMentor: true, verifiedAt: new Date().toISOString().split('T')[0] } : t
       )
     }));
   };
 
   const uploadResumeData = async (payload: FormData | { resumeText: string; fileName?: string } | ParsedResume): Promise<ParsedResume> => {
-    // Errors reach the upload dialog; a resume is never filled in with guessed content
-    const parsed = await api.student.uploadResume(student.id, payload);
+    const isMock = !student.id || student.id.startsWith('stu-') || student.id.startsWith('stu_');
+    const targetId = (!isMock ? student.id : null) || currentUser?.studentId || currentUser?.id || 'me';
+    const parsed = await api.student.uploadResume(targetId, payload);
     setStudent(prev => ({ ...prev, resume: parsed }));
+    try {
+      const refreshed = await api.student.getProfile(targetId);
+      if (refreshed && refreshed.name) setStudent(refreshed);
+    } catch (e) {
+      console.warn('Failed to refresh student profile after resume upload:', e);
+    }
     return parsed;
   };
 
@@ -1748,13 +1775,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuthModalOpen(true);
   };
 
-  // The server rejected the session (expired, revoked, or an account it never issued).
-  // Clear the signed-in state and ask the user to sign in again, instead of leaving the
-  // app showing a dashboard whose every request fails.
+  // The server rejected the session (expired, revoked, or the account changed):
+  // drop it and ask the user to sign in again instead of failing every request.
   useEffect(() => {
     const onSessionEnded = () => {
       if (!isAuthenticatedRef.current) return;
-      logger.info('AUTH', 'Session ended by the server; returning to sign-in');
       if (typeof document !== 'undefined' && document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
       }
@@ -1780,35 +1805,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const loginUser = async (email: string, password: string) => {
+    setAuthNotice(null);
     const res = await api.auth.login(email, password);
     const user = res.user;
-
-    // Backend returns minimal user info: {id, name, email, role}
-    // Additional fields are optional and will be undefined for now
     const authUser: AuthUser = {
       id: user.id,
       name: user.name,
       email: user.email,
-      role: user.role as UserRole,
-      studentId: res.studentId || undefined,
-      // Optional fields - backend doesn't provide these yet
-      collegeId: undefined,
-      collegeName: undefined,
-      programId: undefined,
-      programName: undefined,
-      department: undefined,
-      className: undefined,
-      assignedClassName: undefined,
-      assignedClasses: undefined,
-      subProgramName: undefined,
-      isIndependent: undefined,
-      permissions: undefined
+      role: user.role,
+      studentId: res.studentId,
+      collegeId: user.collegeId,
+      collegeName: user.collegeName,
+      programId: user.programId,
+      programName: user.programName,
+      department: user.department,
+      className: user.className,
+      assignedClassName: user.assignedClassName,
+      assignedClasses: user.assignedClasses,
+      subProgramName: user.subProgramName,
+      isIndependent: user.isIndependent,
+      permissions: user.permissions
     };
-
     setCurrentUser(authUser);
-    setActiveRole(user.role as UserRole);
+    setActiveRole(user.role);
     setIsAuthenticated(true);
-    setAuthNotice(null);
     localStorage.setItem('auth_user', JSON.stringify(authUser));
     setAuthModalOpen(false);
     logger.info('AUTH', `Login: ${authUser.email} (${authUser.role})`);
@@ -1824,9 +1844,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           } else {
             setLatestReport(null);
           }
-          // Sync the coin balance from the server right after profile load so
-          // the localStorage-cached value is never shown for more than one paint.
-          void refreshCoins();
         }
       } catch (err) {
         console.warn('Profile fetch after login:', err);
@@ -1841,24 +1858,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser(authUser);
     setActiveRole(authUser.role);
     setIsAuthenticated(true);
-    setAuthNotice(null);
     localStorage.setItem('auth_user', JSON.stringify(authUser));
     setAuthModalOpen(false);
   };
 
   const registerCandidate = async (data: { name: string; email: string; password?: string }) => {
     const res = await api.auth.registerCandidate(data);
-    loginWithAuthUser(res.user, res.token);
-    try {
-      const prof = await api.student.getProfile(res.studentId);
-      if (prof) {
-        setStudent(prof);
-        setLatestReport(null);
-        void refreshCoins();
-      }
-    } catch (err) {
-      console.warn('Profile fetch after candidate register:', err);
-    }
+    return res;
   };
 
   const registerInstitution = async (data: {
@@ -1946,7 +1952,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (prof) {
         setStudent(prof);
         setLatestReport(prof.recentReports?.[0] || null);
-        void refreshCoins();
       }
     } catch (err) {
       console.warn('Profile fetch after verification:', err);
@@ -1985,42 +1990,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         track: s.track || s.domain || 'General Track',
         programId: s.programId,
         programName: s.programName,
-        subProgramName: s.subProgramName,
-        mentorName: s.mentorName || s.mentor_name || 'Dr. S. Ranganathan',
-        mentorEmail: s.mentorEmail || s.mentor_email || 'ranganathan.s@college.edu',
-        codingHandles: s.codingHandles || { leetcodeSolved: 110, githubRepos: 12 },
+        mentorName: s.mentorName || s.mentor_name || '',
+        mentorEmail: s.mentorEmail || s.mentor_email || '',
+        codingHandles: s.codingHandles || { leetcodeSolved: 0, githubRepos: 0 },
         resume: s.resume || null,
-        criteriaTasks: s.criteriaTasks || INITIAL_CRITERIA_TASKS,
-        improvementChecklist: s.improvementChecklist || [
-          { id: 'imp-1', week: 'Week 1', title: 'Speed & Fluency Modulation', description: 'Maintain 130-150 words per minute during system design intros.', isCompleted: true, completedAt: '2026-09-21' },
-          { id: 'imp-2', week: 'Week 2', title: 'Database Composite Index Trade-offs', description: 'Articulate B-Tree left-prefix rule without filler words.', isCompleted: true, completedAt: '2026-09-24' },
-          { id: 'imp-3', week: 'Week 3', title: 'Microservices Distributed Transaction', description: 'Explain Saga orchestration pattern with failure compensation steps.', isCompleted: false },
-          { id: 'imp-4', week: 'Week 4', title: 'FAANG Executive Communication', description: 'Lead end-to-end cloud scalability architectural review under time pressure.', isCompleted: false }
-        ],
-        recentReports: s.recentReports || [
-          {
-            id: 'rep-001',
-            date: '2026-09-26',
-            sessionType: 'MOCK_INTERVIEW',
-            overallScore: s.score || s.overallReadiness || 82,
-            technicalScore: 86,
-            communicationScore: 78,
-            averageWpm: 124,
-            totalFillerWords: 9,
-            fillerWordBreakdown: { 'um': 4, 'like': 3, 'you know': 2 },
-            skillBreakdown: [
-              { skill: 'Core Technical Proficiency', score: 88, status: 'STRONG', recommendation: 'Clear mastery of architecture' },
-              { skill: 'Verbal Fluency & Delivery', score: 76, status: 'MODERATE', recommendation: 'Reduce filler words during transitions' }
-            ],
-            actionableNextSteps: [
-              'Pause 2 seconds before answering rather than saying "um"',
-              'Practice explaining trade-offs concisely'
-            ],
-            tabSwitches: 0,
-            isFlagged: false
-          }
-        ],
-        overallReadiness: s.overallReadiness ?? s.score ?? 82,
+        criteriaTasks: s.criteriaTasks || [],
+        improvementChecklist: s.improvementChecklist || [],
+        recentReports: s.recentReports || [],
+        overallReadiness: s.overallReadiness ?? s.score ?? 0,
         coins: getInitialCoins(s.id || s.studentId || s.rollNumber),
         zeroCoinsAt: s.zeroCoinsAt,
         isIndependent: Boolean(s.isIndependent || s.department?.includes('Independent') || s.track === 'EXTERNAL')
@@ -2033,9 +2010,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {}
 
       if (!targetProfile) {
-        const all = await api.admin.getUsers({ role: 'STUDENT' }).then(users =>
-          users.length > 0 ? users : api.admin.getStudents()
-        ).catch(() => api.admin.getStudents());
+        const all = await api.admin.getStudents();
         const found = all.find((item: any) => item.id === id || item.rollNumber === id);
         if (found) {
           return openStudentDashboard(found);
@@ -2121,17 +2096,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     logger.info('NAV', `Returned to ${originalRole} dashboard`);
   };
 
-  const logout = async () => {
+  const logout = () => {
     logger.info('AUTH', `Sign out: ${currentUser?.email || 'User'}`);
-
-    // Call backend logout
-    try {
-      await api.auth.logout();
-    } catch (error) {
-      console.warn('Backend logout error:', error);
-      // Continue with local cleanup
-    }
-
+    api.setToken(null);
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_user');
     setCurrentUser(null);
     setIsAuthenticated(false);
     setActiveRole('STUDENT');

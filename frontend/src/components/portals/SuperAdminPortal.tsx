@@ -50,6 +50,7 @@ import { StudentDirectoryTable } from '../common/StudentDirectoryTable';
 import { AssessmentMonitoringWidget } from '../common/AssessmentMonitoringWidget';
 import { DepartmentClassesManager } from '../common/DepartmentClassesManager';
 import { CustomSelect } from '../common/CustomSelect';
+import { MissingDataAlertModal } from '../common/MissingDataAlertModal';
 
 export const SuperAdminPortal: React.FC = () => {
   const { currentUser, assignments, viewProgramDetail, openStudentDashboard, openAdminDashboard } = useApp();
@@ -95,6 +96,10 @@ export const SuperAdminPortal: React.FC = () => {
   const [bulkIntakeModal, setBulkIntakeModal] = useState(false);
   const [bulkScrutinyModal, setBulkScrutinyModal] = useState(false);
   const [inspectStudentId, setInspectStudentId] = useState<string | null>(null);
+  const [missingDataAlert, setMissingDataAlert] = useState<{
+    isOpen: boolean;
+    items: Array<{ type: 'department' | 'program' | 'class' | 'student'; name: string }>;
+  }>({ isOpen: false, items: [] });
 
   // Session Assignment Modal state
   const [assignModalOpen, setAssignModalOpen] = useState(false);
@@ -214,14 +219,11 @@ export const SuperAdminPortal: React.FC = () => {
   const loadData = async () => {
     try {
       setLoading(true);
-
       const [col, progs, depts, stu] = await Promise.all([
         api.college.getDetails(collegeId),
         api.college.getPrograms(collegeId),
         api.college.getDepartments(collegeId),
-        api.admin.getUsers({ role: 'STUDENT' }).then(users =>
-          users.length > 0 ? users : api.admin.getStudents()
-        ).catch(() => api.admin.getStudents())
+        api.admin.getStudents()
       ]);
       setCollegeDetails(col);
       setPrograms(progs);
@@ -301,12 +303,7 @@ export const SuperAdminPortal: React.FC = () => {
       if (selectedProgramToCopy && copyEnrolledStudents) {
         const sourceProg = programs.find(p => p.id === selectedProgramToCopy);
         if (sourceProg) {
-          let allStudents: any[] = [];
-          try {
-            allStudents = await api.admin.getUsers({ role: 'STUDENT' });
-          } catch {
-            allStudents = await api.admin.getStudents();
-          }
+          const allStudents = await api.admin.getStudents();
           const targetSourceStudents = allStudents.filter(s => 
             (s.programName && s.programName.toLowerCase() === sourceProg.name.toLowerCase()) ||
             (s.track && s.track.toLowerCase().includes(sourceProg.name.toLowerCase())) ||
@@ -649,6 +646,53 @@ export const SuperAdminPortal: React.FC = () => {
   // Bulk Student Intake & Conditional Program/Department Assignment (CSV)
   const handleBulkIntake = async () => {
     if (!csvIntakeText.trim()) return;
+
+    // 1. Pre-validate CSV rows against existing departments and programs
+    const lines = csvIntakeText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    const availableDepts = new Set(departments.map(d => (d.name || '').toLowerCase().trim()));
+    const availableProgs = new Set(programs.map(p => (p.name || '').toLowerCase().trim()));
+    const missing: Array<{ type: 'department' | 'program'; name: string }> = [];
+    const seen = new Set<string>();
+
+    let startIdx = 0;
+    let headerCols: string[] = [];
+    if (lines.length > 0 && lines[0].toLowerCase().includes('name')) {
+      startIdx = 1;
+      headerCols = lines[0].split(',').map(c => c.trim().toLowerCase().replace(/^["']|["']$/g, ''));
+    }
+
+    for (let i = startIdx; i < lines.length; i++) {
+      const cols = lines[i].split(',').map(c => c.trim().replace(/^["']|["']$/g, ''));
+      if (cols.length < 2) continue;
+      let deptVal = '';
+      let progVal = '';
+
+      if (headerCols.length > 0) {
+        headerCols.forEach((col, idx) => {
+          const val = cols[idx] || '';
+          if (col.includes('dept') || col.includes('department')) deptVal = val.trim();
+          else if (col.includes('program')) progVal = val.trim();
+        });
+      } else {
+        if (cols.length >= 4) deptVal = cols[3]?.trim();
+        if (cols.length >= 3) progVal = cols[2]?.trim();
+      }
+
+      if (deptVal && availableDepts.size > 0 && !availableDepts.has(deptVal.toLowerCase()) && !seen.has(`dept:${deptVal.toLowerCase()}`)) {
+        seen.add(`dept:${deptVal.toLowerCase()}`);
+        missing.push({ type: 'department', name: deptVal });
+      }
+      if (progVal && availableProgs.size > 0 && !availableProgs.has(progVal.toLowerCase()) && !seen.has(`prog:${progVal.toLowerCase()}`)) {
+        seen.add(`prog:${progVal.toLowerCase()}`);
+        missing.push({ type: 'program', name: progVal });
+      }
+    }
+
+    if (missing.length > 0) {
+      setMissingDataAlert({ isOpen: true, items: missing });
+      return;
+    }
+
     try {
       const res = await api.studentBatch.bulkImportAndAssignStudents(collegeId, csvIntakeText, intakeTargetBatch);
       logger.info('STUDENT', `Bulk student assignment completed: ${res.count} candidates in Batch ${intakeTargetBatch}`);
@@ -660,6 +704,18 @@ export const SuperAdminPortal: React.FC = () => {
       setCsvIntakeText('');
       await loadData();
     } catch (err: any) {
+      const msg = err?.message || '';
+      if (err?.code === 'MISSING_DATA' || msg.includes('not available')) {
+        const missingMatch = msg.match(/are not available in your institution:\s*([^.]+)/i);
+        if (missingMatch) {
+          const items = missingMatch[1].split(',').map((s: string) => ({
+            type: msg.includes('program') ? 'program' : 'department' as any,
+            name: s.trim()
+          }));
+          setMissingDataAlert({ isOpen: true, items });
+          return;
+        }
+      }
       setFeedback({ type: 'error', message: err?.message || 'Bulk student assignment failed.' });
     }
   };
@@ -920,25 +976,13 @@ export const SuperAdminPortal: React.FC = () => {
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => openAdminDashboard({
-                      role: 'PROGRAM_ADMIN',
-                      name: selectedProgramProfile.program.assignedAdminName || 'Program Administrator',
-                      email: selectedProgramProfile.program.assignedAdminEmail || 'admin.cloud@college.edu',
-                      programName: selectedProgramProfile.program.name,
-                      collegeId: currentUser?.collegeId
-                    })}
-                    className="p-3 bg-blue-50/70 hover:bg-blue-100/80 rounded-xl border border-blue-200 text-xs space-y-1 sm:text-right transition-all cursor-pointer group shadow-2xs hover:shadow-xs"
-                    title="Open Program Admin Dashboard"
-                  >
-                    <span className="text-[10px] text-blue-600 block uppercase font-mono font-semibold">Assigned Lead Admin · Click to open</span>
-                    <div className="font-bold text-neutral-900 group-hover:text-blue-700 flex items-center sm:justify-end space-x-1">
+                  <div className="p-3 bg-neutral-50 rounded-xl border border-neutral-200 text-xs space-y-1 sm:text-right">
+                    <span className="text-[10px] text-neutral-500 block uppercase font-mono font-semibold">Assigned Lead Admin</span>
+                    <div className="font-bold text-neutral-900 flex items-center sm:justify-end space-x-1">
                       <span>{selectedProgramProfile.program.assignedAdminName || 'Lead Mentor'}</span>
-                      <ExternalLink className="w-3 h-3 text-blue-500" />
                     </div>
-                    <div className="text-[11px] font-mono text-neutral-500">{selectedProgramProfile.program.assignedAdminEmail || 'Open Dashboard'}</div>
-                  </button>
+                    <div className="text-[11px] font-mono text-neutral-500">{selectedProgramProfile.program.assignedAdminEmail || 'Not Assigned'}</div>
+                  </div>
                 </div>
 
                 {/* 4 Program Telemetry KPI Boxes */}
@@ -950,10 +994,14 @@ export const SuperAdminPortal: React.FC = () => {
                     }
                     return matchesP;
                   });
-                  const highPerformers = enrolledInProg.filter(s => (s.score || 70) >= 75);
+                  const highPerformers = enrolledInProg.filter(s => (s.score || 0) >= 75);
                   const avgScore = enrolledInProg.length > 0 
-                    ? Math.round(enrolledInProg.reduce((acc, s) => acc + (s.score || 70), 0) / enrolledInProg.length)
-                    : 74;
+                    ? Math.round(enrolledInProg.reduce((acc, s) => acc + (s.score || 0), 0) / enrolledInProg.length)
+                    : 0;
+                  const progAssignments = assignments.filter((a: any) => 
+                    a.programName === selectedProgramProfile.program.name || 
+                    a.programId === selectedProgramProfile.program.id
+                  );
 
                   return (
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-neutral-100">
@@ -965,7 +1013,7 @@ export const SuperAdminPortal: React.FC = () => {
 
                       <div className="p-4 bg-neutral-50 rounded-xl border border-neutral-200/80">
                         <span className="text-[11px] font-medium text-neutral-500 block">Assessments Assigned</span>
-                        <div className="text-2xl font-bold text-blue-600 mt-1">6</div>
+                        <div className="text-2xl font-bold text-blue-600 mt-1">{progAssignments.length}</div>
                         <span className="text-[10px] text-neutral-400">Voice &amp; Audio Drills</span>
                       </div>
 
@@ -1041,7 +1089,6 @@ export const SuperAdminPortal: React.FC = () => {
                         <th className="py-3 px-4">Department</th>
                         <th className="py-3 px-4">Sub-Track</th>
                         <th className="py-3 px-4">Readiness Score</th>
-                        <th className="py-3 px-4 text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-neutral-200/60">
@@ -1050,14 +1097,7 @@ export const SuperAdminPortal: React.FC = () => {
                         .map(s => (
                           <tr key={s.id} className="hover:bg-neutral-50/50">
                             <td className="py-3 px-4 font-semibold text-neutral-900">
-                              <button
-                                type="button"
-                                onClick={() => openStudentDashboard(s)}
-                                className="text-blue-600 hover:text-blue-800 hover:underline cursor-pointer font-bold"
-                                title={`Open ${s.name}'s Student Dashboard`}
-                              >
-                                {s.name}
-                              </button>
+                              <span>{s.name}</span>
                             </td>
                             <td className="py-3 px-4 font-mono text-neutral-500">{s.rollNumber || '—'}</td>
                             <td className="py-3 px-4 text-neutral-700">{s.department}</td>
@@ -1067,20 +1107,9 @@ export const SuperAdminPortal: React.FC = () => {
                               </span>
                             </td>
                             <td className="py-3 px-4">
-                              <span className={`font-bold ${s.score >= 75 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                                {s.score || 70}%
+                              <span className={`font-bold ${(s.score || 0) >= 75 ? 'text-emerald-600' : 'text-neutral-900'}`}>
+                                {s.score || 0}%
                               </span>
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              <button
-                                type="button"
-                                onClick={() => openStudentDashboard(s)}
-                                className="px-2.5 py-1 text-xs bg-neutral-100 hover:bg-neutral-200 text-neutral-800 rounded-lg cursor-pointer inline-flex items-center space-x-1 font-semibold"
-                                title={`Open ${s.name}'s Student Dashboard`}
-                              >
-                                <LayoutDashboard className="w-3 h-3 text-neutral-600" />
-                                <span>Open Dashboard</span>
-                              </button>
                             </td>
                           </tr>
                         ))}
@@ -1458,8 +1487,8 @@ export const SuperAdminPortal: React.FC = () => {
                     filteredDepartments.map((dept) => {
                       const deptStudents = students.filter(s => s.department === dept.name);
                       const avgScore = deptStudents.length > 0 
-                        ? Math.round(deptStudents.reduce((acc, s) => acc + (s.score || 70), 0) / deptStudents.length)
-                        : 72;
+                        ? Math.round(deptStudents.reduce((acc, s) => acc + (s.score || 0), 0) / deptStudents.length)
+                        : 0;
 
                       return (
                         <tr 
@@ -1475,14 +1504,20 @@ export const SuperAdminPortal: React.FC = () => {
                           </td>
                           <td className="py-3.5 px-5 text-neutral-800 font-medium" onClick={(e) => e.stopPropagation()}>
                             <div className="py-1">
-                              <span className="font-semibold text-neutral-900 block">
-                                {dept.assignedAdminName || 'Head of Department'}
-                              </span>
-                              <span className="text-[10px] text-neutral-400 block font-mono">Department Counselor</span>
+                              {dept.assignedAdminName ? (
+                                <>
+                                  <span className="font-semibold text-neutral-900 block">
+                                    {dept.assignedAdminName}
+                                  </span>
+                                  <span className="text-[10px] text-neutral-400 block font-mono">Department Counselor</span>
+                                </>
+                              ) : (
+                                <span className="text-neutral-400 font-normal italic">Unassigned</span>
+                              )}
                             </div>
                           </td>
                           <td className="py-3.5 px-5 font-mono text-neutral-500">
-                            {dept.assignedAdminEmail || 'admin.' + dept.code.toLowerCase() + '@college.edu'}
+                            {dept.assignedAdminEmail || <span className="text-neutral-400 font-sans italic">—</span>}
                           </td>
                           <td className="py-3.5 px-5">
                             <span className="font-bold text-neutral-900">{deptStudents.length}</span>
@@ -1604,7 +1639,7 @@ export const SuperAdminPortal: React.FC = () => {
               setAssignModalOpen(true);
             }}
             title="Institutional Student Candidate Roster"
-            subtitle="Click any candidate row or Dashboard button to open their live interactive Student Dashboard."
+            subtitle="View student performance and assessment history."
           />
         </div>
       )}
@@ -1817,11 +1852,11 @@ export const SuperAdminPortal: React.FC = () => {
               {(() => {
                 const deptStudents = students.filter(s => s.department === selectedDeptForProgress.name);
                 const avgScore = deptStudents.length > 0
-                  ? Math.round(deptStudents.reduce((acc, s) => acc + (s.score || 70), 0) / deptStudents.length)
-                  : 72;
-                const topCount = deptStudents.filter(s => (s.score || 70) >= 75).length;
-                const midCount = deptStudents.filter(s => (s.score || 70) >= 60 && (s.score || 70) < 75).length;
-                const needCount = deptStudents.filter(s => (s.score || 70) < 60).length;
+                  ? Math.round(deptStudents.reduce((acc, s) => acc + (s.score || 0), 0) / deptStudents.length)
+                  : 0;
+                const topCount = deptStudents.filter(s => (s.score || 0) >= 75).length;
+                const midCount = deptStudents.filter(s => (s.score || 0) >= 60 && (s.score || 0) < 75).length;
+                const needCount = deptStudents.filter(s => (s.score || 0) > 0 && (s.score || 0) < 60).length;
 
                 return (
                   <>
@@ -1904,8 +1939,8 @@ export const SuperAdminPortal: React.FC = () => {
                                     </span>
                                   </td>
                                   <td className="py-2.5 px-4">
-                                    <span className={`font-bold ${s.score >= 75 ? 'text-emerald-600' : 'text-neutral-900'}`}>
-                                      {s.score || 70}%
+                                    <span className={`font-bold ${(s.score || 0) >= 75 ? 'text-emerald-600' : 'text-neutral-900'}`}>
+                                      {s.score || 0}%
                                     </span>
                                   </td>
                                 </tr>
@@ -2896,6 +2931,20 @@ export const SuperAdminPortal: React.FC = () => {
           onClose={() => setInspectStudentId(null)}
         />
       )}
+      {/* ========================================================================= */}
+      {/* MODAL: MISSING DATA ALERT (PRE-REQUISITE ENTITIES MISSING POPUP) */}
+      {/* ========================================================================= */}
+      <MissingDataAlertModal
+        isOpen={missingDataAlert.isOpen}
+        onClose={() => setMissingDataAlert(prev => ({ ...prev, isOpen: false }))}
+        missingItems={missingDataAlert.items}
+        onAction={() => {
+          setActiveTab('DEPARTMENTS');
+          setMissingDataAlert(prev => ({ ...prev, isOpen: false }));
+          setBulkIntakeModal(false);
+        }}
+        actionLabel="Go to Academic Departments"
+      />
 
     </div>
   );

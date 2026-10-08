@@ -140,8 +140,12 @@ async function generateNextQuestion(
 ): Promise<{ text: string; category: string; keyPoints: string[]; source: QuestionSource; topicKey?: string }> {
   const resume = state.resume;
   const turns = state.turn_results ?? [];
-  // With a resume, alternate: a resume item, then a follow-up on the answer about it
-  const topic = pickResumeTopic(buildResumeTopics(resume), state.resume_topics_asked ?? [], turns);
+  // An interview assigned on a topic stays on that topic; otherwise, with a resume,
+  // alternate: a resume item, then a follow-up on the answer about it
+  const assignedTopic = state.assigned_topic?.trim() || '';
+  const topic = assignedTopic
+    ? null
+    : pickResumeTopic(buildResumeTopics(resume), state.resume_topics_asked ?? [], turns);
   const focus = chooseQuestionFocus({
     topicAvailable: topic !== null,
     lastTurn: turns[turns.length - 1],
@@ -158,7 +162,7 @@ async function generateNextQuestion(
         focus,
         resume_topic: focus === 'resume_topic' && topic ? topic.detail : '',
         difficulty,
-        domain: meta.domain,
+        domain: assignedTopic || meta.domain,
         // The candidate's actual answers (plus evaluator notes) let the AI ask a
         // follow-up on what they just said instead of an unrelated question.
         previous_turns: turns.slice(-5).map((t) => ({

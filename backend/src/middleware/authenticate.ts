@@ -33,8 +33,8 @@ export async function verifyAccessToken(token: string): Promise<JWTPayload> {
   }
 
   // DB check: token_version must match — catches revoked tokens after logout
-  const { rows } = await db.query<{ token_version: number; status: string; is_active: boolean }>(
-    'SELECT token_version, status, is_active FROM identity.users WHERE id = $1',
+  const { rows } = await db.query<{ token_version: number; status: string; is_active: boolean; institution_id: string | null }>(
+    'SELECT token_version, status, is_active, institution_id FROM identity.users WHERE id = $1',
     [decoded.id]
   );
   if (rows.length === 0) {
@@ -45,7 +45,8 @@ export async function verifyAccessToken(token: string): Promise<JWTPayload> {
   if (rows[0].token_version !== decoded.tokenVersion) {
     throw new AppError(401, 'Token has been revoked', 'TOKEN_REVOKED');
   }
-  return decoded;
+  // The institution comes from the database, so a college change applies immediately
+  return { ...decoded, institutionId: rows[0].institution_id ?? decoded.institutionId ?? null };
 }
 
 export const authenticate = async (
@@ -69,3 +70,4 @@ export const authenticate = async (
     next(err);
   }
 };
+

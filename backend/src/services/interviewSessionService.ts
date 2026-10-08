@@ -16,7 +16,7 @@ import { Events, AttemptCompletedPayload } from '../shared/events/events';
 import { sessionContextService, InterviewState, InterviewResume } from './sessionContextService';
 import type { InterviewReport } from './interviewReport';
 import { getCoins, spendCoin, refundCoin } from './coinService';
-import { getCurrentResume } from './resumeService';
+import { getCurrentResume, getStoredResumeData } from './resumeService';
 
 export const FIRST_QUESTION =
   "Tell me about yourself. Walk me through your background, the key skills you've built, and what you've been working on most recently.";
@@ -55,11 +55,16 @@ export interface AttemptScores {
 export async function createAttemptAndSession(
   student: StudentContext,
 ): Promise<{ attemptId: string; sessionId: string }> {
-  const { rows: assessmentRows } = await db.query<{ id: string }>(
+  let { rows: assessmentRows } = await db.query<{ id: string }>(
     `SELECT id FROM assessment.assessments WHERE is_active = true ORDER BY created_at LIMIT 1`
   );
   if (assessmentRows.length === 0) {
-    throw new AppError(503, 'No active assessment configuration found', 'NO_ASSESSMENT');
+    // A fresh database has no assessment yet: create the standard one, as POST /interview does
+    ({ rows: assessmentRows } = await db.query<{ id: string }>(
+      `INSERT INTO assessment.assessments (name, assessment_type, interview_type, is_active)
+       VALUES ('Standard Technical Assessment', 'MOCK_INTERVIEW', 'TECHNICAL', true)
+       RETURNING id`
+    ));
   }
 
   const client = await db.connect();
@@ -131,8 +136,9 @@ const cleanList = (values: unknown[] | undefined, max: number) =>
 
 async function loadResume(studentId: string, name: string): Promise<InterviewResume> {
   const current = await getCurrentResume(studentId);
-  if (!current) return { name, skills: [], projects: [] };
-  const { skills, projects, experience } = current.view;
+  const view = current?.view ?? await getStoredResumeData(studentId);
+  if (!view) return { name, skills: [], projects: [] };
+  const { skills, projects, experience } = view;
   return {
     name,
     skills: cleanList([...skills.languages, ...skills.frameworks, ...skills.databases, ...skills.tools], 20),
@@ -149,11 +155,61 @@ async function loadResume(studentId: string, name: string): Promise<InterviewRes
         description: [e.duration, e.description].filter(Boolean).join(': ').slice(0, 400),
       })),
     ].filter((p) => p.title),
-    text: current.text.slice(0, RESUME_EXCERPT_CHARS),
+    text: (current?.text ?? '').slice(0, RESUME_EXCERPT_CHARS),
   };
 }
 
-export async function startLiveInterview(userId: string, _resumeInput?: ResumeInput): Promise<{
+// Self-practice interviews are about the student's resume; an assignment may fix a topic
+const RESUME_INTERVIEW_TOPICS = new Set(['', 'personal resume & projects', 'general programming']);
+
+// Creates the student record (with a default program and batch) for a user who has none yet
+async function createStudentForUser(userId: string): Promise<(StudentContext & { name: string }) | null> {
+  const { rows: uRows } = await db.query(
+    `SELECT id, name, email, institution_id FROM identity.users WHERE id = $1`,
+    [userId]
+  );
+  if (uRows.length === 0) return null;
+  const u = uRows[0];
+  let instId = u.institution_id;
+  if (!instId) {
+    const { rows: insts } = await db.query(`SELECT id FROM org.institutions ORDER BY created_at DESC LIMIT 1`);
+    instId = insts[0]?.id;
+  }
+  let programId: string | null = null;
+  let batchId: string | null = null;
+  if (instId) {
+    const { rows: progs } = await db.query(`SELECT id, name FROM org.programs WHERE institution_id = $1 LIMIT 1`, [instId]);
+    if (progs.length > 0) {
+      programId = progs[0].id;
+    } else {
+      const { rows: newProg } = await db.query(
+        `INSERT INTO org.programs (institution_id, name, code) VALUES ($1, 'General Engineering', 'GEN') RETURNING id`,
+        [instId]
+      );
+      programId = newProg[0].id;
+    }
+    const { rows: batches } = await db.query(`SELECT id FROM org.batches WHERE program_id = $1 LIMIT 1`, [programId]);
+    if (batches.length > 0) {
+      batchId = batches[0].id;
+    } else {
+      const { rows: newBatch } = await db.query(
+        `INSERT INTO org.batches (program_id, name, year, track) VALUES ($1, 'Batch 2026', 2026, 'General Track') RETURNING id`,
+        [programId]
+      );
+      batchId = newBatch[0].id;
+    }
+  }
+  const roll = `STU${Date.now().toString(36).toUpperCase().slice(-6)}`;
+  const { rows: newStu } = await db.query(
+    `INSERT INTO org.students (user_id, program_id, batch_id, roll_number, department, batch_year, track)
+     VALUES ($1, $2, $3, $4, 'General Department', 2026, 'General Track')
+     RETURNING id, program_id, batch_id, subdivision_id`,
+    [u.id, programId, batchId, roll]
+  );
+  return newStu.length > 0 ? { ...newStu[0], name: u.name } : null;
+}
+
+export async function startLiveInterview(userId: string, _resumeInput?: ResumeInput, topic?: string): Promise<{
   sessionId: string;
   attemptId: string;
   maxTurns: number;
@@ -167,8 +223,8 @@ export async function startLiveInterview(userId: string, _resumeInput?: ResumeIn
      WHERE s.user_id = $1`,
     [userId]
   );
-  if (rows.length === 0) throw new AppError(404, 'Student profile not found', 'NOT_FOUND');
-  const student = rows[0];
+  const student = rows[0] ?? await createStudentForUser(userId);
+  if (!student) throw new AppError(404, 'Student profile not found', 'NOT_FOUND');
 
   // Fail fast before creating anything when the wallet is empty
   if ((await getCoins(student.id)).coins < 1) {
@@ -186,12 +242,15 @@ export async function startLiveInterview(userId: string, _resumeInput?: ResumeIn
   const resume = await loadResume(student.id, student.name)
     .catch(() => ({ name: student.name, skills: [], projects: [] }) as InterviewResume);
 
+  const assignedTopic = RESUME_INTERVIEW_TOPICS.has((topic ?? '').trim().toLowerCase()) ? '' : topic!.trim().slice(0, 200);
+
   const initialState: InterviewState = {
     session_id: sessionId,
     student_id: student.id,
-    topic_curriculum: ['General Programming'],
+    topic_curriculum: [assignedTopic || 'General Programming'],
     completed_topics: [],
-    active_topic: 'General Programming',
+    active_topic: assignedTopic || 'General Programming',
+    ...(assignedTopic ? { assigned_topic: assignedTopic } : {}),
     active_topic_question_count: 0,
     max_questions_per_topic: 3,
     do_not_ask_or_repeat: [FIRST_QUESTION],

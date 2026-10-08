@@ -62,7 +62,7 @@ const restoreSchema = z.object({ coins: z.number().int().min(0).max(MAX_COINS).d
 
 coinsRouter.post(
   '/:studentId/restore',
-  requireRole('PLATFORM_OWNER', 'SUPER_ADMIN', 'COLLEGE_ADMIN', 'PROGRAM_ADMIN', 'PLACEMENT_COORDINATOR'),
+  requireRole('PLATFORM_OWNER', 'SUPER_ADMIN', 'COLLEGE_ADMIN', 'PROGRAM_ADMIN', 'PLACEMENT_COORDINATOR', 'DEPARTMENT_ADMIN'),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const studentId = req.params.studentId as string;

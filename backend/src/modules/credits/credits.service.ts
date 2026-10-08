@@ -2,6 +2,12 @@ import { createHash } from 'crypto';
 import { db } from '../../shared/db/pool';
 import { AppError } from '../../shared/errors/AppError';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function toSafeUuid(val?: string | null): string | null {
+  if (!val) return null;
+  return UUID_RE.test(val) ? val : null;
+}
+
 function ikey(raw: string): string {
   return raw.length <= 100 ? raw : createHash('sha256').update(raw).digest('hex').slice(0, 100);
 }
@@ -52,13 +58,14 @@ export class CreditService {
         [newBalance, accounts[0].id]
       );
 
+      const safeRefId = toSafeUuid(referenceId);
       const { rows: txn } = await client.query(
         `INSERT INTO credit.credit_transactions
            (account_id, student_id, transaction_type, amount, balance_after, idempotency_key,
             reference_type, reference_id, metadata)
          VALUES ($1,$2,'CONSUME',$3,$4,$5,$6,$7,$8) RETURNING id`,
         [accounts[0].id, studentId, amount, newBalance, idempotencyKey,
-         reason, referenceId, JSON.stringify({ reason })]
+         reason, safeRefId, JSON.stringify({ reason, originalReferenceId: referenceId })]
       );
 
       await client.query('COMMIT');
@@ -107,8 +114,9 @@ export class CreditService {
         `SELECT max_balance FROM credit.credit_policies
          WHERE scope_type = 'GLOBAL' AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`
       );
-      const maxBalance = policies.length > 0 && policies[0].max_balance !== null
+      const policyMax = policies.length > 0 && policies[0].max_balance !== null
         ? Number(policies[0].max_balance) : Infinity;
+      const maxBalance = policyMax;
 
       const currentBalance = Number(accounts[0].balance);
       const newBalance = Math.max(currentBalance, Math.min(currentBalance + amount, maxBalance, capAt ?? Infinity));
@@ -119,13 +127,14 @@ export class CreditService {
         [newBalance, accounts[0].id]
       );
 
+      const safeRefId = toSafeUuid(referenceId);
       const { rows: txn } = await client.query(
         `INSERT INTO credit.credit_transactions
            (account_id, student_id, transaction_type, amount, balance_after, idempotency_key,
             reference_type, reference_id, metadata)
          VALUES ($1,$2,'EARN',$3,$4,$5,$6,$7,$8) RETURNING id`,
         [accounts[0].id, studentId, applied, newBalance, idempotencyKey,
-         reason, referenceId, JSON.stringify({ reason, requested: amount })]
+         reason, safeRefId, JSON.stringify({ reason, requested: amount, originalReferenceId: referenceId })]
       );
 
       await client.query('COMMIT');

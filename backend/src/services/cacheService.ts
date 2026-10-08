@@ -20,7 +20,7 @@ async function getClient(): Promise<RedisClient> {
     _client = null;
     _connectPromise = null;
   });
-  _connectPromise = _client.connect().catch((err) => {
+  _connectPromise = _client.connect().catch((err: unknown) => {
     _client = null;
     _connectPromise = null;
     throw err;
@@ -61,12 +61,12 @@ async function del(...keys: string[]): Promise<void> {
 async function delPattern(pattern: string): Promise<void> {
   try {
     const client = await getClient();
-    let cursor = 0;
+    let cursor = '0';
     do {
       const reply = await client.scan(cursor as any, { MATCH: pattern, COUNT: 100 });
-      cursor = Number(reply.cursor);
+      cursor = String(reply.cursor);
       if (reply.keys.length > 0) await client.del(reply.keys);
-    } while (cursor !== 0);
+    } while (cursor !== '0');
   } catch {
     // non-fatal
   }

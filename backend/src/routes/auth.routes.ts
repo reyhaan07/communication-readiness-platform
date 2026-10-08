@@ -165,72 +165,284 @@ authRouter.post('/register', async (req: Request, res: Response): Promise<void> 
   }
 });
 
-// ── POST /api/auth/register-institution ───────────────────────────────────────
-// A college signs up: creates the institution and its Super Admin account.
+// ── POST /api/auth/register-candidate ──────────────────────────────────────────
 
-const institutionSignupSchema = z.object({
-  institutionName: z.string().trim().min(2, 'Enter the institution name').max(255),
-  institutionCode: z.string().trim().min(2, 'Enter a short code for the institution').max(20)
-    .regex(/^[A-Za-z0-9_-]+$/, 'The short code may only use letters, digits, - and _')
-    .transform(s => s.toUpperCase()),
-  campusCity: z.string().trim().min(2, 'Enter the campus city').max(100),
-  adminName: z.string().trim().min(2, 'Enter the administrator name').max(255),
-  adminEmail: z.string().trim().email('Enter a valid administrator email').transform(s => s.toLowerCase()),
+const registerCandidateSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters').max(255),
+  email: z.string().email('Valid email is required').transform(s => s.toLowerCase()),
   password: z.string().min(8, 'Password must be at least 8 characters'),
-  contactPhone: z.string().trim().max(30).optional(),
+  collegeId: z.string().optional(),
+  department: z.string().optional().default('Computer Science & Engineering'),
+  batchYear: z.number().int().optional().default(2026),
+  track: z.string().optional().default('General Track'),
+  programName: z.string().optional().default('General Engineering'),
+  rollNumber: z.string().optional(),
+});
+
+authRouter.post('/register-candidate', async (req: Request, res: Response): Promise<void> => {
+  const parsed = registerCandidateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const detail = parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
+    sendError(res, new AppError(422, `Validation failed: ${detail}`, 'VALIDATION_ERROR'));
+    return;
+  }
+  const { name, email, password, collegeId, department, batchYear, track, programName, rollNumber } = parsed.data;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Resolve institution
+    let instId: string;
+    let instName = 'Main Institution';
+    if (collegeId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(collegeId)) {
+      const { rows } = await client.query(`SELECT id, name FROM org.institutions WHERE id = $1`, [collegeId]);
+      if (rows.length > 0) {
+        instId = rows[0].id;
+        instName = rows[0].name;
+      } else {
+        const { rows: latest } = await client.query(`SELECT id, name FROM org.institutions ORDER BY created_at DESC LIMIT 1`);
+        instId = latest[0]?.id;
+        instName = latest[0]?.name || instName;
+      }
+    } else {
+      const { rows: latest } = await client.query(`SELECT id, name FROM org.institutions ORDER BY created_at DESC LIMIT 1`);
+      if (latest.length > 0) {
+        instId = latest[0].id;
+        instName = latest[0].name;
+      } else {
+        const { rows: created } = await client.query(
+          `INSERT INTO org.institutions (name, code, type, is_active) VALUES ('Main Institution', 'INST01', 'COLLEGE', true) RETURNING id, name`
+        );
+        instId = created[0].id;
+        instName = created[0].name;
+      }
+    }
+
+    // 2. Resolve or create program
+    let progId: string;
+    const { rows: progs } = await client.query(
+      `SELECT id, name FROM org.programs WHERE institution_id = $1 LIMIT 1`,
+      [instId]
+    );
+    if (progs.length > 0) {
+      progId = progs[0].id;
+    } else {
+      const { rows: newProg } = await client.query(
+        `INSERT INTO org.programs (institution_id, name, code) VALUES ($1, $2, 'GEN') RETURNING id`,
+        [instId, programName || 'General Engineering']
+      );
+      progId = newProg[0].id;
+    }
+
+    // 3. Resolve or create batch
+    let batchId: string;
+    const { rows: batches } = await client.query(
+      `SELECT id FROM org.batches WHERE program_id = $1 AND year = $2 LIMIT 1`,
+      [progId, batchYear]
+    );
+    if (batches.length > 0) {
+      batchId = batches[0].id;
+    } else {
+      const { rows: newBatch } = await client.query(
+        `INSERT INTO org.batches (program_id, name, year, track) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [progId, `Batch ${batchYear}`, batchYear, track || 'General Track']
+      );
+      batchId = newBatch[0].id;
+    }
+
+    // Check if email is already in use
+    const { rows: existingUsers } = await client.query(
+      `SELECT id FROM identity.users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+      [email]
+    );
+    if (existingUsers.length > 0) {
+      throw new AppError(409, 'An account with this email address already exists. Please sign in.', 'EMAIL_ALREADY_EXISTS');
+    }
+
+    // 4. Hash password
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // 5. Insert into identity.users (strictly prevent duplicates)
+    const { rows: userRows } = await client.query<{ id: string; name: string; email: string; role: UserRole; token_version: number }>(
+      `INSERT INTO identity.users (name, email, password_hash, role, token_version, status, institution_id)
+       VALUES ($1, $2, $3, 'STUDENT', 0, 'ACTIVE', $4)
+       RETURNING id, name, email, role, token_version`,
+      [name, email.toLowerCase(), passwordHash, instId]
+    );
+    const user = userRows[0];
+
+    // 6. Ensure independent candidate record is persisted in candidate.independent_candidates
+    await client.query(
+      `INSERT INTO candidate.independent_candidates (user_id, name, email, credits, status)
+       VALUES ($1, $2, $3, 5, 'ACTIVE')
+       ON CONFLICT (user_id) DO UPDATE SET
+         name = EXCLUDED.name,
+         email = EXCLUDED.email,
+         credits = COALESCE(candidate.independent_candidates.credits, 5)`,
+      [user.id, name, email.toLowerCase()]
+    ).catch(() => {});
+
+    // 7. Ensure student record exists in org.students with 5 coins/credits
+    const actualRoll = rollNumber || `22CS${Math.floor(1000 + Math.random() * 9000)}`;
+    const { rows: studentRows } = await client.query<{ id: string }>(
+      `INSERT INTO org.students (user_id, program_id, batch_id, roll_number, department, batch_year, track, coins, overall_readiness)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 5, 75)
+       ON CONFLICT (user_id) DO UPDATE SET
+         coins = COALESCE(org.students.coins, 5)
+       RETURNING id`,
+      [user.id, progId, batchId, actualRoll, department, batchYear, track]
+    );
+    const studentId = studentRows[0].id;
+
+    // 8. Ensure credit account exists in credit.credit_accounts with 5 credits
+    await client.query(
+      `INSERT INTO credit.credit_accounts (student_id, balance)
+       VALUES ($1, 5)
+       ON CONFLICT (student_id) DO UPDATE SET balance = COALESCE(credit.credit_accounts.balance, 5)`,
+      [studentId]
+    ).catch(() => {});
+
+    // 9. Role assignment
+    await client.query(
+      `INSERT INTO identity.role_assignments (user_id, role_id, institution_id, program_id, batch_id, scope_type, is_active)
+       SELECT $1, id, $2, $3, $4, 'BATCH', true FROM identity.roles WHERE name = 'STUDENT'
+       ON CONFLICT DO NOTHING`,
+      [user.id, instId, progId, batchId]
+    ).catch(() => {});
+
+    await client.query('COMMIT');
+
+    // Registration is strictly for registering — candidate must now sign in through login modal
+    sendSuccess(res, {
+      message: 'Candidate registration successful! Please sign in with your email and password to access the portal.',
+      requiresLogin: true,
+      email: user.email,
+      name: user.name,
+      studentId
+    }, 201);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    sendError(res, err);
+  } finally {
+    client.release();
+  }
+});
+
+// ── POST /api/auth/register-institution ────────────────────────────────────────
+
+const registerInstitutionSchema = z.object({
+  institutionName: z.string().min(2, 'Institution name must be at least 2 characters').max(255),
+  institutionCode: z.string().min(2, 'Institution code must be at least 2 characters').max(20).transform(s => s.toUpperCase()),
+  campusCity: z.string().min(2, 'City must be at least 2 characters').max(255),
+  adminName: z.string().min(2, 'Admin name must be at least 2 characters').max(255),
+  adminEmail: z.string().email('Valid admin email is required').transform(s => s.toLowerCase()),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  contactPhone: z.string().optional().nullable(),
 });
 
 authRouter.post('/register-institution', async (req: Request, res: Response): Promise<void> => {
-  const parsed = institutionSignupSchema.safeParse(req.body);
+  const parsed = registerInstitutionSchema.safeParse(req.body);
   if (!parsed.success) {
-    sendError(res, new AppError(422, firstIssue(parsed.error), 'VALIDATION_ERROR'));
+    const detail = parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
+    sendError(res, new AppError(422, `Validation failed: ${detail}`, 'VALIDATION_ERROR'));
     return;
   }
   const { institutionName, institutionCode, campusCity, adminName, adminEmail, password } = parsed.data;
 
   const client = await db.connect();
   try {
-    const passwordHash = await bcrypt.hash(password, 10);
     await client.query('BEGIN');
-    try {
-      const { rows: clash } = await client.query(
-        'SELECT 1 FROM org.institutions WHERE code = $1 OR lower(name) = lower($2)',
-        [institutionCode, institutionName]
-      );
-      if (clash.length > 0) {
-        throw new AppError(409, `An institution named "${institutionName}" or with code ${institutionCode} is already registered.`, 'DUPLICATE_INSTITUTION');
-      }
-      const { rows: inst } = await client.query<{ id: string; name: string; code: string; campus_city: string; created_at: Date }>(
-        `INSERT INTO org.institutions (name, code, campus_city) VALUES ($1, $2, $3)
-         RETURNING id, name, code, campus_city, created_at`,
-        [institutionName, institutionCode, campusCity]
-      );
-      const { rows: userRows } = await client.query<{ id: string }>(
-        `INSERT INTO identity.users (name, email, password_hash, role, token_version, status, institution_id)
-         VALUES ($1, $2, $3, 'SUPER_ADMIN', 0, 'ACTIVE', $4) RETURNING id`,
-        [adminName, adminEmail, passwordHash, inst[0].id]
-      );
-      await client.query('COMMIT');
 
-      const authUser: AuthUser = { id: userRows[0].id, email: adminEmail, role: 'SUPER_ADMIN', name: adminName, tokenVersion: 0 };
-      sendSuccess(res, {
-        token: signToken(authUser),
-        user: { id: authUser.id, name: adminName, email: adminEmail, role: 'SUPER_ADMIN' },
-        institution: {
-          id: inst[0].id, name: inst[0].name, code: inst[0].code,
-          campusCity: inst[0].campus_city, createdAt: inst[0].created_at,
-        },
-      }, 201);
-    } catch (innerErr) {
-      await client.query('ROLLBACK');
-      throw innerErr;
+    // Check if administrator email is already registered
+    const { rows: existingUser } = await client.query(
+      `SELECT id FROM identity.users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+      [adminEmail]
+    );
+    if (existingUser.length > 0) {
+      throw new AppError(409, 'An account with this administrator email already exists. Please sign in or use another email.', 'EMAIL_ALREADY_EXISTS');
     }
+
+    // Check if institution code or name already exists
+    const { rows: existingInst } = await client.query(
+      `SELECT id FROM org.institutions WHERE UPPER(code) = $1 OR LOWER(name) = LOWER($2) LIMIT 1`,
+      [institutionCode, institutionName]
+    );
+    if (existingInst.length > 0) {
+      throw new AppError(409, 'An institution with this code or name already exists. Please choose a unique name and code.', 'DUPLICATE_CODE');
+    }
+
+    // 1. Create institution
+    const { rows: newInst } = await client.query(
+      `INSERT INTO org.institutions (name, code, type, is_active)
+       VALUES ($1, $2, $3, true)
+       RETURNING id, name, code, type AS campus_city, created_at`,
+      [institutionName, institutionCode, campusCity]
+    );
+    const instRow = newInst[0];
+
+    // 2. Hash admin password
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // 3. Insert admin user as SUPER_ADMIN linked to this institution
+    const { rows: userRows } = await client.query<{ id: string; name: string; email: string; role: UserRole; token_version: number; status: string; institution_id: string }>(
+      `INSERT INTO identity.users (name, email, password_hash, role, status, institution_id)
+       VALUES ($1, $2, $3, 'SUPER_ADMIN', 'ACTIVE', $4)
+       RETURNING id, name, email, role, token_version, status, institution_id`,
+      [adminName, adminEmail.toLowerCase(), passwordHash, instRow.id]
+    );
+    const user = userRows[0];
+
+    // 4. Role assignment
+    await client.query(
+      `INSERT INTO identity.role_assignments (user_id, role_id, institution_id, scope_type, is_active)
+       SELECT $1, id, $2, 'INSTITUTION', true FROM identity.roles WHERE name = 'SUPER_ADMIN'
+       ON CONFLICT DO NOTHING`,
+      [user.id, instRow.id]
+    ).catch(() => {});
+
+    // 5. Accepted invite record for audit trail
+    await client.query(
+      `INSERT INTO identity.pending_invites (institution_id, role, name, email, token, status, expires_at)
+       VALUES ($1, 'SUPER_ADMIN', $2, $3, encode(gen_random_bytes(16), 'hex'), 'ACCEPTED', now() + interval '365 days')
+       ON CONFLICT DO NOTHING`,
+      [instRow.id, adminName, adminEmail]
+    ).catch(() => {});
+
+    await client.query('COMMIT');
+
+    const authUser: AuthUser = {
+      id: user.id,
+      email: user.email,
+      role: 'SUPER_ADMIN',
+      name: user.name,
+      tokenVersion: user.token_version || 0,
+    };
+    const token = signToken(authUser);
+
+    sendSuccess(res, {
+      college: {
+        id: instRow.id,
+        name: instRow.name,
+        code: instRow.code,
+        campusCity: instRow.campus_city || campusCity,
+        createdAt: instRow.created_at,
+        superAdminStatus: 'ACTIVE',
+        superAdminEmail: user.email,
+        superAdminName: user.name
+      },
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: 'SUPER_ADMIN',
+        collegeId: instRow.id,
+        collegeName: instRow.name
+      },
+      token
+    }, 201);
   } catch (err) {
-    if (err instanceof AppError) { sendError(res, err); return; }
-    if ((err as { code?: string }).code === '23505') {
-      sendError(res, new AppError(409, 'An account with this email already exists. Please sign in instead.', 'DUPLICATE_EMAIL'));
-      return;
-    }
+    await client.query('ROLLBACK');
     sendError(res, err);
   } finally {
     client.release();
@@ -259,12 +471,51 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
       throw new AppError(429, `Too many failed attempts. Try again in ${Math.ceil(lockSeconds / 60)} minute(s).`, 'TOO_MANY_ATTEMPTS');
     }
 
+    // One query that also returns the org context the frontend's AuthUser needs
     const { rows } = await db.query<{
       id: string; name: string; email: string; role: UserRole;
       password_hash: string; token_version: number; status: string; is_active: boolean;
+      // student fields
+      student_id: string | null; roll_number: string | null;
+      batch_year: number | null; student_track: string | null;
+      program_id: string | null; program_name: string | null;
+      institution_id: string | null; institution_name: string | null;
+      // faculty / staff fields
+      department: string | null;
     }>(
-      `SELECT id, name, email, role, password_hash, token_version, status, is_active
-       FROM identity.users WHERE email = $1`,
+      `SELECT
+         u.id, u.name, u.email, u.role, u.password_hash, u.token_version, u.status, u.is_active,
+         s.id           AS student_id,
+         s.roll_number,
+         b.year         AS batch_year,
+         b.track        AS student_track,
+         p.id           AS program_id,
+         p.name         AS program_name,
+         COALESCE(u.institution_id, inst.id, ra_inst.id, inv_inst.id, ds_inst.id) AS institution_id,
+         COALESCE(u_inst.name, inst.name, ra_inst.name, inv_inst.name, ds_inst.name) AS institution_name,
+         COALESCE(ds.department, fp.department) AS department
+       FROM identity.users u
+       LEFT JOIN org.institutions       u_inst ON u_inst.id    = u.institution_id
+       LEFT JOIN org.students           s    ON s.user_id     = u.id
+       LEFT JOIN org.batches            b    ON b.id          = s.batch_id
+       LEFT JOIN org.programs           p    ON p.id          = COALESCE(s.program_id, b.program_id)
+       LEFT JOIN org.institutions       inst ON inst.id       = p.institution_id
+       LEFT JOIN LATERAL (
+         SELECT ra.institution_id FROM identity.role_assignments ra
+         WHERE ra.user_id = u.id AND ra.is_active = true AND ra.institution_id IS NOT NULL LIMIT 1
+       ) ra ON true
+       LEFT JOIN org.institutions       ra_inst ON ra_inst.id = ra.institution_id
+       LEFT JOIN LATERAL (
+         SELECT inv.institution_id FROM identity.pending_invites inv
+         WHERE lower(inv.email) = lower(u.email) AND inv.institution_id IS NOT NULL LIMIT 1
+       ) inv ON true
+       LEFT JOIN org.institutions       inv_inst ON inv_inst.id = inv.institution_id
+       LEFT JOIN LATERAL (
+         SELECT d.institution_id, d.department FROM org.department_staff d WHERE d.user_id = u.id LIMIT 1
+       ) ds ON true
+       LEFT JOIN org.institutions       ds_inst ON ds_inst.id = ds.institution_id
+       LEFT JOIN org.faculty_profiles   fp   ON fp.user_id    = u.id
+       WHERE u.email = $1`,
       [email]
     );
 
@@ -278,28 +529,35 @@ authRouter.post('/login', async (req: Request, res: Response): Promise<void> => 
     }
     clearFailures(ip, email);
 
-    const user = rows[0];
-    const blocked = accountBlock(user.status, user.is_active);
+    const row = rows[0];
+    const blocked = accountBlock(row.status, row.is_active);
     if (blocked) throw blocked;
 
-    let studentId: string | null = null;
-    if (user.role === 'STUDENT') {
-      const { rows: sRows } = await db.query<{ id: string }>(
-        'SELECT id FROM org.students WHERE user_id = $1', [user.id]
-      );
-      studentId = sRows[0]?.id ?? null;
-    }
-
     const authUser: AuthUser = {
-      id: user.id, email: user.email, role: user.role,
-      name: user.name, tokenVersion: user.token_version,
+      id: row.id, email: row.email, role: row.role,
+      name: row.name, tokenVersion: row.token_version,
     };
     const token = signToken(authUser);
 
     sendSuccess(res, {
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
-      studentId,
+      user: {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        // Org context — consumed by the frontend's AppContext / localStorage
+        studentId:      row.student_id   ?? undefined,
+        rollNumber:     row.roll_number  ?? undefined,
+        batchYear:      row.batch_year   ?? undefined,
+        track:          row.student_track ?? undefined,
+        programId:      row.program_id   ?? undefined,
+        programName:    row.program_name ?? undefined,
+        collegeId:      row.institution_id   ?? undefined,
+        collegeName:    row.institution_name ?? undefined,
+        department:     row.department   ?? undefined,
+      },
+      studentId: row.student_id,
     });
   } catch (err) {
     sendError(res, err);

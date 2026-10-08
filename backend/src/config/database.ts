@@ -9,6 +9,8 @@ export const db = new Pool({
   max: env.DB_POOL_MAX,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10_000,
 });
 
 db.on('connect', () => {
@@ -16,3 +18,8 @@ db.on('connect', () => {
     console.log('[db] pool connected');
   }
 });
+
+db.on('error', (err) => {
+  console.error('[db] Unexpected background client error on pool:', err);
+});
+

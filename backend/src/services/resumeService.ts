@@ -192,6 +192,15 @@ function normaliseData(raw: unknown): ParsedResumeData | null {
   };
 }
 
+/** Resume details kept on the student record (uploads from before resumes were versioned). */
+export async function getStoredResumeData(studentId: string): Promise<ParsedResumeData | null> {
+  const { rows } = await db.query<{ resume_data: unknown }>(
+    'SELECT resume_data FROM org.students WHERE id = $1',
+    [studentId]
+  );
+  return normaliseData(rows[0]?.resume_data);
+}
+
 /** The student's current resume as stored, or null when none was parsed. */
 export async function getCurrentResume(studentId: string): Promise<{ view: ParsedResumeView; text: string } | null> {
   const { rows } = await db.query<{ file_name: string | null; parsed_text: string | null; parsed_data: unknown; updated_at: Date }>(

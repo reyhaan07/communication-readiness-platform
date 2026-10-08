@@ -3,20 +3,35 @@
 -- embedding dimension: 1536 (OpenAI/Groq text-embedding-3-small compatible).
 -- IVFFlat index is created in migration 068 (separate to allow tuning after data load).
 
-CREATE TABLE IF NOT EXISTS knowledge.knowledge_chunks (
-    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    document_id       UUID NOT NULL REFERENCES knowledge.knowledge_documents(id) ON DELETE CASCADE,
-    chunk_index       INTEGER NOT NULL,
-    chunk_text        TEXT,
-    embedding         vector(1536),
-    embedding_model   VARCHAR(100),
-    embedding_version INTEGER,
-    source_metadata   JSONB,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'vector') THEN
+    CREATE TABLE IF NOT EXISTS knowledge.knowledge_chunks (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        document_id       UUID NOT NULL REFERENCES knowledge.knowledge_documents(id) ON DELETE CASCADE,
+        chunk_index       INTEGER NOT NULL,
+        chunk_text        TEXT,
+        embedding         vector(1536),
+        embedding_model   VARCHAR(100),
+        embedding_version INTEGER,
+        source_metadata   JSONB,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT uq_chunks_document_idx UNIQUE (document_id, chunk_index)
-);
+        CONSTRAINT uq_chunks_document_idx UNIQUE (document_id, chunk_index)
+    );
+  ELSE
+    CREATE TABLE IF NOT EXISTS knowledge.knowledge_chunks (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        document_id       UUID NOT NULL REFERENCES knowledge.knowledge_documents(id) ON DELETE CASCADE,
+        chunk_index       INTEGER NOT NULL,
+        chunk_text        TEXT,
+        embedding         FLOAT8[],
+        embedding_model   VARCHAR(100),
+        embedding_version INTEGER,
+        source_metadata   JSONB,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
--- The table may already exist from an earlier migration with fewer columns;
--- add the columns this definition introduces.
-ALTER TABLE knowledge.knowledge_chunks ADD COLUMN IF NOT EXISTS embedding vector(1536);
+        CONSTRAINT uq_chunks_document_idx UNIQUE (document_id, chunk_index)
+    );
+  END IF;
+END $$;

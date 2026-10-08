@@ -186,13 +186,6 @@ export const UserProfilePage: React.FC = () => {
 
           <div className="flex items-center gap-2 self-start sm:self-auto">
             <button
-              onClick={() => setActiveView('DASHBOARD')}
-              className="px-4 py-2 bg-neutral-900 hover:bg-black text-white rounded-xl text-xs font-semibold transition-colors flex items-center space-x-1.5 cursor-pointer shadow-xs"
-            >
-              <LayoutDashboard className="w-3.5 h-3.5" />
-              <span>Open Dashboard</span>
-            </button>
-            <button
               onClick={requestSignOut}
               className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-semibold transition-colors flex items-center space-x-1.5 cursor-pointer"
             >
@@ -253,7 +246,7 @@ export const UserProfilePage: React.FC = () => {
                 : (isPlatformOwner ? '🌐 Master Platform Owner' : activeRole.replace(/_/g, ' '))}
             </p>
             <p className="text-[11px] text-neutral-500">
-              {activeRole === 'STUDENT' ? `Mentor: ${student?.mentorName || 'Dr. S. Ranganathan'}` : 'Tier: Enterprise Multi-Tenant Master'}
+              {activeRole === 'STUDENT' ? `Mentor: ${student?.mentorName || 'Not Assigned'}` : 'Tier: Enterprise Multi-Tenant Master'}
             </p>
           </div>
 
@@ -275,7 +268,7 @@ export const UserProfilePage: React.FC = () => {
               <span>{activeRole === 'STUDENT' ? 'Placement Readiness' : 'Account Status'}</span>
             </div>
             <p className="text-sm font-semibold text-neutral-900">
-              {activeRole === 'STUDENT' ? `${student?.overallReadiness || 82}% Overall Score` : 'Permanent System Administrator'}
+              {activeRole === 'STUDENT' ? `${student?.overallReadiness ?? 0}% Overall Score` : 'Permanent System Administrator'}
             </p>
             <p className="text-[11px] text-neutral-500 font-mono">
               {activeRole === 'STUDENT' ? 'Active Candidate' : 'Active'}
@@ -336,12 +329,12 @@ export const UserProfilePage: React.FC = () => {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {(activeRole === 'STUDENT' ? [
-              `LeetCode Solved: ${student?.codingHandles?.leetcodeSolved ?? 110} Problems`,
-              `GitHub Repositories: ${student?.codingHandles?.githubRepos ?? 12} Public Repos`,
-              `Resume Profile: ${student?.resume ? 'Verified & Uploaded' : 'Uploaded'}`,
-              `Verbal Pacing: ${student?.recentReports?.[0]?.averageWpm ?? 124} WPM Target`,
-              `Technical Readiness: ${student?.recentReports?.[0]?.technicalScore ?? 86}% Verified`,
-              `Listening Comprehension: Completed FinPay Session`
+              `LeetCode Solved: ${student?.codingHandles?.leetcodeSolved ?? 0} Problems`,
+              `GitHub Repositories: ${student?.codingHandles?.githubRepos ?? 0} Public Repos`,
+              `Resume Profile: ${student?.resume ? 'Verified & Uploaded' : 'Pending Upload'}`,
+              `Verbal Pacing: ${student?.recentReports?.[0]?.averageWpm ? `${student.recentReports[0].averageWpm} WPM` : 'Awaiting Assessment'}`,
+              `Technical Readiness: ${student?.recentReports?.[0]?.technicalScore ? `${student.recentReports[0].technicalScore}% Verified` : 'Pending'}`,
+              `Listening Comprehension: ${student?.recentReports?.some(r => r.sessionType === 'LISTENING_COMPREHENSION') ? 'Completed' : 'Pending Lab'}`
             ] : isPlatformOwner ? [
               'Onboard & Provision Institutional Colleges',
               'Dispatch Super Admin Activation Invites',

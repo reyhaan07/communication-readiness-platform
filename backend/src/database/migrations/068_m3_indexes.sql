@@ -22,12 +22,19 @@ CREATE INDEX IF NOT EXISTS idx_listening_stories_active ON performance.listening
 -- lists=100 is appropriate for up to ~1M chunks; tune after initial data load.
 DO $$
 BEGIN
-  -- ivfflat requires a fixed-dimension column (vector(n)); migration 019 may have
-  -- created the column as an unconstrained `vector`, in which case skip the index.
-  IF (SELECT atttypmod FROM pg_attribute
-      WHERE attrelid = 'knowledge.knowledge_chunks'::regclass AND attname = 'embedding') > 0 THEN
-    CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_embedding
-      ON knowledge.knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
-      WITH (lists = 100);
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'vector') THEN
+    BEGIN
+      ALTER TABLE knowledge.knowledge_chunks ALTER COLUMN embedding TYPE vector(1536);
+    EXCEPTION WHEN OTHERS THEN
+      NULL;
+    END;
+
+    BEGIN
+      CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_embedding
+          ON knowledge.knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
+          WITH (lists = 100);
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'Skipping ivfflat index: %', SQLERRM;
+    END;
   END IF;
 END $$;

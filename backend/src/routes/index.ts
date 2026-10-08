@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { healthRouter } from './health';
 import { authRouter } from './auth.routes';
+import { logsRouter } from './logs.route';
 import { studentRouter } from './student.routes';
 import { interviewRouter, liveInterviewRouter } from './interview.routes';
 import { portalRouter } from './portal.routes';
@@ -13,8 +14,11 @@ import { skillsRouter } from './skills.routes';
 import { performanceRouter } from './performance.routes';
 import { listeningRouter } from './listening.routes';
 import { learningRouter } from './learning.routes';
-import { authenticate } from '../middleware/authenticate';
 import { coinsRouter } from './coins.routes';
+import { collegeRouter } from './college.routes';
+import { invitesRouter } from './invites.routes';
+import { studentBatchRouter } from './studentBatch.routes';
+import { authenticate } from '../middleware/authenticate';
 
 // Module 2 — assessments, attempts, sessions, responses, reports, question bank
 import { assessmentsRouter } from '../modules/assessments/assessments.routes';
@@ -35,16 +39,23 @@ export const router = Router();
 // Public
 router.use('/health', healthRouter);
 router.use('/auth', authRouter);
+router.use('/logs', logsRouter);
 
 // Org lookup endpoints are read-only and needed before login (e.g. batch list on registration form).
 router.use('/org', orgRouter);
 
-// Platform Owner routes — protected, requires PLATFORM_OWNER role
-router.use('/owner', authenticate, ownerRouter);
+// Accepting an invitation happens before the invitee has an account
+router.use('/invites', invitesRouter);
 
 // Protected — authenticate on every request; individual routes add authorize() as needed
+router.use('/owner', authenticate, ownerRouter);
+router.use('/college', authenticate, collegeRouter);
+router.use('/studentBatch', authenticate, studentBatchRouter);
 router.use('/students', authenticate, studentRouter);
+// Live mock interview first; the remaining interview endpoints (listening practice
+// sessions, proctoring events) are served by interviewRouter
 router.use('/interview', authenticate, liveInterviewRouter);
+router.use('/interview', authenticate, interviewRouter);
 router.use('/portals', authenticate, portalRouter);
 router.use('/mentors', authenticate, mentorRouter);
 router.use('/trainers', authenticate, trainerRouter);
@@ -72,3 +83,4 @@ router.use('/credit-policies', creditPoliciesRouter);
 router.use('/checklist', checklistRouter);
 router.use('/verifications', verificationsRouter);
 router.use('/placement-eligibility', placementRouter);
+router.use('/placement', placementRouter);

@@ -3,7 +3,12 @@
 -- Actual database_schema has no configuration or created_by columns.
 -- Following actual schema.
 
-CREATE EXTENSION IF NOT EXISTS vector;
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS assessment.assessments (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),

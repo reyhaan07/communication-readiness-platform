@@ -600,6 +600,14 @@ export const MockInterviewRoom: React.FC = () => {
 
   const initMicrophoneStream = async (): Promise<boolean> => {
     try {
+      // Browsers only allow the microphone on HTTPS (or localhost)
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+        setMicPermissionError(
+          `The browser blocks the microphone on ${window.location.protocol}//${window.location.host}. ` +
+          `Open the secure version: https://${window.location.host}`
+        );
+        return false;
+      }
       if (!mediaStreamRef.current || !mediaStreamRef.current.active) {
         let stream: MediaStream;
         try {
@@ -913,9 +921,14 @@ export const MockInterviewRoom: React.FC = () => {
           if (naturalVoice) utterance.voice = naturalVoice;
 
           let hasEnded = false;
+          let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
           const handleEnd = () => {
             if (hasEnded) return;
             hasEnded = true;
+            if (keepAliveInterval) {
+              clearInterval(keepAliveInterval);
+              keepAliveInterval = null;
+            }
             onDone();
           };
 
@@ -935,7 +948,19 @@ export const MockInterviewRoom: React.FC = () => {
             handleEnd();
           };
 
-          const safetyTimeout = Math.min(14000, Math.max(5000, questionText.length * 80));
+          // Chrome stops speech synthesis after ~15 s; pausing and resuming keeps long questions going
+          keepAliveInterval = setInterval(() => {
+            if (!window.speechSynthesis.speaking) {
+              if (keepAliveInterval) clearInterval(keepAliveInterval);
+              keepAliveInterval = null;
+              return;
+            }
+            window.speechSynthesis.pause();
+            window.speechSynthesis.resume();
+          }, 8000);
+
+          // Fallback if the browser never reports the end: about 11 characters a second, plus a margin
+          const safetyTimeout = Math.max(10000, questionText.length * 90 + 8000);
           setTimeout(() => {
             if (isSpeakingRef.current && !hasEnded) {
               handleEnd();
@@ -1449,6 +1474,27 @@ export const MockInterviewRoom: React.FC = () => {
         </div>
       )}
 
+      {/* The microphone only works over HTTPS (or on localhost) */}
+      {typeof window !== 'undefined' && !window.isSecureContext && window.location.protocol === 'http:' && (
+        <div className="bg-rose-50 border-2 border-rose-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs text-rose-950 shadow-sm">
+          <div className="flex items-center space-x-3">
+            <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0" />
+            <div>
+              <strong className="block font-bold">Microphone Blocked by Insecure HTTP</strong>
+              <span className="text-rose-800">Your browser blocks microphone permissions on plain HTTP. Switch to HTTPS to allow mic access.</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => { window.location.href = window.location.href.replace(/^http:/i, 'https:'); }}
+            className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs shadow-xs cursor-pointer whitespace-nowrap flex items-center space-x-1.5"
+          >
+            <span>Switch to Secure HTTPS Now</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Reconnecting banner */}
       {reconnectAttempt && (
         <div className="bg-amber-50 border border-amber-300 rounded-xl p-3.5 flex items-center justify-between text-amber-900 text-xs">
@@ -1498,6 +1544,36 @@ export const MockInterviewRoom: React.FC = () => {
             </span>
             <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${activeAssignment.isMandatory ? 'bg-amber-100 text-amber-900' : 'bg-neutral-100 text-neutral-700'}`}>
               {activeAssignment.isMandatory ? 'Mandatory' : 'Optional'}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Self-practice: questions come from the student's uploaded resume and their answers */}
+      {!hasSessionStarted && !activeAssignment && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs text-emerald-900 shadow-2xs">
+          <div className="flex items-center space-x-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 animate-pulse"></span>
+            <div>
+              <span className="font-semibold text-emerald-950">Personal Resume-Based Mock Interview</span>
+              <span className="text-emerald-700 ml-1.5">
+                · {student.resume ? 'Questions follow your resume and your answers' : 'Upload your resume so questions can cover your own projects'}
+              </span>
+              {student.resume?.skills?.languages?.length ? (
+                <p className="text-[11px] text-emerald-800 mt-0.5 font-mono">
+                  Skills: {student.resume.skills.languages.slice(0, 5).join(', ')}
+                </p>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            {student.resume && (
+              <span className="px-2.5 py-0.5 rounded font-mono text-[10px] bg-emerald-200/70 text-emerald-900 font-semibold">
+                RESUME GROUNDED
+              </span>
+            )}
+            <span className="px-2.5 py-0.5 rounded text-[10px] font-semibold bg-white border border-emerald-300 text-emerald-900">
+              Practice Mode
             </span>
           </div>
         </div>

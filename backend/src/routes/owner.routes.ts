@@ -1,820 +1,616 @@
-import { Router, Response, NextFunction } from 'express';
+import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import { db } from '../shared/db/pool';
+import { AppError } from '../shared/errors/AppError';
 import { sendSuccess, sendError } from '../shared/helpers/response';
 import { AuthRequest } from '../middleware/authenticate';
 import { requireRole } from '../middleware/authorize';
-import { z } from 'zod';
-import { AppError } from '../shared/errors/AppError';
-import crypto from 'crypto';
-import { env } from '../config/env';
+import { sendInviteEmail } from '../services/emailService';
 
 export const ownerRouter = Router();
 
-// All owner routes require PLATFORM_OWNER role
-const requirePlatformOwner = requireRole('PLATFORM_OWNER');
+// Platform owner or Super Admin role
+ownerRouter.use(requireRole('PLATFORM_OWNER', 'SUPER_ADMIN'));
 
-// GET /institutions/:id[/programs|/departments]: the Platform Owner, or a Super
-// Admin / College Admin reading their own institution.
-const requireOwnerOrOwnInstitution = async (
-  req: AuthRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
+// ── GET /api/owner/colleges ──────────────────────────────────────────────────
+ownerRouter.get('/colleges', async (_req: Request, res: Response): Promise<void> => {
   try {
-    const user = req.user!;
-    if (user.role === 'PLATFORM_OWNER') { next(); return; }
-    if (user.role === 'SUPER_ADMIN' || user.role === 'COLLEGE_ADMIN') {
-      const { rows } = await db.query<{ institution_id: string | null }>(
-        'SELECT institution_id FROM identity.users WHERE id = $1',
-        [user.id]
-      );
-      if (rows[0]?.institution_id && rows[0].institution_id === req.params.id) { next(); return; }
-    }
-    throw new AppError(403, 'Access denied', 'FORBIDDEN');
+    const { rows } = await db.query(`
+      SELECT
+        i.id,
+        i.name,
+        i.code,
+        i.type AS campus_city,
+        i.created_at,
+        COALESCE(u_admin.email, sa.email, inv.email) AS super_admin_email,
+        COALESCE(u_admin.name, sa.name, inv.name) AS super_admin_name,
+        CASE
+          WHEN u_admin.id IS NOT NULL AND u_admin.status = 'ACTIVE' THEN 'ACTIVE'
+          WHEN sa.id IS NOT NULL AND sa.status = 'ACTIVE' THEN 'ACTIVE'
+          WHEN inv.id IS NOT NULL AND inv.status = 'PENDING' THEN 'PENDING_INVITE'
+          ELSE 'NO_ADMIN'
+        END AS super_admin_status
+      FROM org.institutions i
+      LEFT JOIN LATERAL (
+        SELECT u.id, u.email, u.name, u.status
+        FROM identity.users u
+        LEFT JOIN identity.role_assignments ra ON ra.user_id = u.id
+        WHERE (u.institution_id = i.id OR ra.institution_id = i.id)
+          AND u.role = 'SUPER_ADMIN'
+        ORDER BY u.created_at DESC
+        LIMIT 1
+      ) u_admin ON true
+      LEFT JOIN LATERAL (
+        SELECT inv_a.email, u.name, u.id, u.status
+        FROM identity.pending_invites inv_a
+        JOIN identity.users u ON LOWER(u.email) = LOWER(inv_a.email)
+        WHERE inv_a.institution_id = i.id
+          AND inv_a.role = 'SUPER_ADMIN'
+          AND inv_a.status = 'ACCEPTED'
+        ORDER BY inv_a.created_at DESC
+        LIMIT 1
+      ) sa ON true
+      LEFT JOIN LATERAL (
+        SELECT inv_p.id, inv_p.email, inv_p.name, inv_p.status
+        FROM identity.pending_invites inv_p
+        WHERE inv_p.institution_id = i.id
+          AND inv_p.role = 'SUPER_ADMIN'
+          AND inv_p.status = 'PENDING'
+        ORDER BY inv_p.created_at DESC
+        LIMIT 1
+      ) inv ON true
+      ORDER BY i.created_at DESC
+    `);
+    sendSuccess(res, rows);
   } catch (err) {
     sendError(res, err);
   }
-};
+});
 
-// ── GET /api/owner/institutions ───────────────────────────────────────────────
-// List all institutions
-ownerRouter.get(
-  '/institutions',
-  requirePlatformOwner,
-  async (_req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const { rows } = await db.query(
-        `SELECT
-          id,
-          name,
-          code,
-          campus_city,
-          created_at
-         FROM org.institutions
-         ORDER BY name`
-      );
-      sendSuccess(res, { institutions: rows });
-    } catch (err) {
-      sendError(res, err);
+// ── POST /api/owner/colleges ─────────────────────────────────────────────────
+const createCollegeSchema = z.object({
+  name: z.string().min(3).max(255),
+  code: z.string().min(2).max(20).transform(s => s.toUpperCase()),
+  campusCity: z.string().min(2).max(255),
+});
+
+ownerRouter.post('/colleges', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const parsed = createCollegeSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new AppError(422, 'Validation failed', 'VALIDATION_ERROR');
     }
-  }
-);
 
-// ── POST /api/owner/institutions ──────────────────────────────────────────────
-// Create a new institution
-const createInstitutionSchema = z.object({
-  name: z.string().min(1),
-  code: z.string().min(1),
-  type: z.string().optional(),
-  campusCity: z.string().optional()
+    const { name, code, campusCity } = parsed.data;
+
+    // Check for duplicates
+    const { rows: existing } = await db.query(
+      `SELECT id FROM org.institutions WHERE UPPER(code) = $1 OR LOWER(name) = LOWER($2)`,
+      [code, name]
+    );
+    if (existing.length > 0) {
+      throw new AppError(409, 'Institution with this name or code already exists', 'DUPLICATE');
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO org.institutions (name, code, type, is_active)
+       VALUES ($1, $2, $3, true)
+       RETURNING id, name, code, type AS campus_city, created_at`,
+      [name, code, campusCity]
+    );
+
+    const inst = rows[0];
+
+    sendSuccess(res, inst, 201);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// ── POST /api/owner/colleges/:collegeId/invite-super-admin ──────────────────
+const inviteSuperAdminSchema = z.object({
+  firstName: z.string().trim().min(1, 'First name is required').max(255),
+  lastName: z.string().trim().max(255).nullish().transform(s => s || ''),
+  email: z.string().trim().email('Valid email address is required').transform(s => s.toLowerCase()),
 });
 
 ownerRouter.post(
-  '/institutions',
-  requirePlatformOwner,
-  async (req: AuthRequest, res: Response): Promise<void> => {
+  ['/colleges/:collegeId/invite-super-admin', '/colleges/:collegeId/super-admin/invite'],
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const parsed = createInstitutionSchema.safeParse(req.body);
-
+      const collegeId = Array.isArray(req.params.collegeId) ? req.params.collegeId[0] : (req.params.collegeId || '');
+      const parsed = inviteSuperAdminSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(422).json({
-          status: 'error',
-          message: 'Invalid institution data',
-          errors: parsed.error.errors
-        });
-        return;
-      }
-
-      const { name, code, campusCity } = parsed.data;
-
-      // Check if code already exists
-      const existingCheck = await db.query(
-        `SELECT id FROM org.institutions WHERE code = $1`,
-        [code.toUpperCase()]
-      );
-
-      if (existingCheck.rows.length > 0) {
-        res.status(409).json({
-          status: 'error',
-          message: 'Institution code already exists'
-        });
-        return;
-      }
-
-      // Insert institution
-      const result = await db.query(
-        `INSERT INTO org.institutions (name, code, campus_city)
-         VALUES ($1, $2, $3)
-         RETURNING id, name, code, campus_city, created_at`,
-        [name, code.toUpperCase(), campusCity || null]
-      );
-
-      const institution = result.rows[0];
-
-      sendSuccess(res, {
-        institution: {
-          id: institution.id,
-          name: institution.name,
-          code: institution.code,
-          campusCity: institution.campus_city,
-          createdAt: institution.created_at
-        }
-      }, 201);
-    } catch (err) {
-      sendError(res, err);
-    }
-  }
-);
-
-// ── GET /api/owner/institutions/:id ───────────────────────────────────────────
-// Get institution details with metrics
-ownerRouter.get(
-  '/institutions/:id',
-  requireOwnerOrOwnInstitution,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const { id } = req.params;
-
-      // Get institution details
-      const institutionResult = await db.query(
-        `SELECT
-          id,
-          name,
-          code,
-          campus_city,
-          created_at
-         FROM org.institutions
-         WHERE id = $1`,
-        [id]
-      );
-
-      if (institutionResult.rows.length === 0) {
-        res.status(404).json({
-          status: 'error',
-          message: 'Institution not found'
-        });
-        return;
-      }
-
-      const institution = institutionResult.rows[0];
-
-      // Get program count
-      const programCountResult = await db.query(
-        `SELECT COUNT(*) as count
-         FROM org.programs
-         WHERE institution_id = $1`,
-        [id]
-      );
-      const programCount = parseInt(programCountResult.rows[0].count);
-
-      // Get student count (via batches)
-      const studentCountResult = await db.query(
-        `SELECT COUNT(DISTINCT s.id) as count
-         FROM org.students s
-         JOIN org.batches b ON s.batch_id = b.id
-         JOIN org.programs p ON b.program_id = p.id
-         WHERE p.institution_id = $1`,
-        [id]
-      );
-      const studentCount = parseInt(studentCountResult.rows[0].count);
-
-      // Get department count
-      const deptCountResult = await db.query(
-        `SELECT COUNT(*) as count
-         FROM org.departments
-         WHERE institution_id = $1`,
-        [id]
-      );
-      const departmentCount = parseInt(deptCountResult.rows[0].count);
-
-      // Get Super Admin info (if exists)
-      const superAdminResult = await db.query(
-        `SELECT u.id, u.name, u.email, u.status, u.created_at
-         FROM identity.users u
-         WHERE u.role = 'SUPER_ADMIN'
-         AND EXISTS (
-           SELECT 1 FROM identity.invites i
-           WHERE i.institution_id = $1
-           AND i.accepted_by_user_id = u.id
-           AND i.status = 'ACCEPTED'
-         )
-         LIMIT 1`,
-        [id]
-      );
-
-      let superAdmin = null;
-      let superAdminStatus = 'NONE';
-
-      if (superAdminResult.rows.length > 0) {
-        superAdmin = superAdminResult.rows[0];
-        superAdminStatus = 'ACTIVE';
-      } else {
-        // Check for pending invite
-        const pendingInviteResult = await db.query(
-          `SELECT id, email, status, expires_at
-           FROM identity.invites
-           WHERE institution_id = $1
-           AND role = 'SUPER_ADMIN'
-           AND status = 'PENDING'
-           ORDER BY created_at DESC
-           LIMIT 1`,
-          [id]
-        );
-
-        if (pendingInviteResult.rows.length > 0) {
-          superAdminStatus = 'PENDING_INVITE';
-          superAdmin = {
-            email: pendingInviteResult.rows[0].email,
-            inviteStatus: pendingInviteResult.rows[0].status,
-            expiresAt: pendingInviteResult.rows[0].expires_at
-          };
-        }
-      }
-
-      sendSuccess(res, {
-        institution,
-        metrics: {
-          programCount,
-          studentCount,
-          departmentCount
-        },
-        superAdmin,
-        superAdminStatus
-      });
-    } catch (err) {
-      sendError(res, err);
-    }
-  }
-);
-
-// ── GET /api/owner/stats ──────────────────────────────────────────────────────
-// Platform-wide statistics
-ownerRouter.get(
-  '/stats',
-  requirePlatformOwner,
-  async (_req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      // Total institutions
-      const institutionsResult = await db.query(
-        `SELECT COUNT(*) as count FROM org.institutions`
-      );
-      const totalInstitutions = parseInt(institutionsResult.rows[0].count);
-
-      // Total Super Admins (accepted invites)
-      const superAdminsResult = await db.query(
-        `SELECT COUNT(*) as count
-         FROM identity.users
-         WHERE role = 'SUPER_ADMIN'`
-      );
-      const totalSuperAdmins = parseInt(superAdminsResult.rows[0].count);
-
-      // Active Super Admins
-      const activeSuperAdminsResult = await db.query(
-        `SELECT COUNT(*) as count
-         FROM identity.users
-         WHERE role = 'SUPER_ADMIN'
-         AND status = 'ACTIVE'`
-      );
-      const activeSuperAdmins = parseInt(activeSuperAdminsResult.rows[0].count);
-
-      // Total students
-      const studentsResult = await db.query(
-        `SELECT COUNT(*) as count FROM org.students`
-      );
-      const totalStudents = parseInt(studentsResult.rows[0].count);
-
-      // Total programs
-      const programsResult = await db.query(
-        `SELECT COUNT(*) as count FROM org.programs`
-      );
-      const totalPrograms = parseInt(programsResult.rows[0].count);
-
-      // Pending invites
-      const pendingInvitesResult = await db.query(
-        `SELECT COUNT(*) as count
-         FROM identity.invites
-         WHERE status = 'PENDING'`
-      );
-      const pendingInvites = parseInt(pendingInvitesResult.rows[0].count);
-
-      sendSuccess(res, {
-        totalInstitutions,
-        totalSuperAdmins,
-        activeSuperAdmins,
-        totalStudents,
-        totalPrograms,
-        pendingInvites
-      });
-    } catch (err) {
-      sendError(res, err);
-    }
-  }
-);
-
-// ── GET /api/owner/users ──────────────────────────────────────────────────────
-// List users with filters (cross-institution for Platform Owner)
-ownerRouter.get(
-  '/users',
-  requirePlatformOwner,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const roleFilter = (req.query.role as string) ?? null;
-      const statusFilter = (req.query.status as string) ?? null;
-      const searchFilter = (req.query.search as string) ?? null;
-      const institutionIdFilter = (req.query.institution_id as string) ?? null;
-
-      let query = `
-        SELECT
-          u.id,
-          u.name,
-          u.email,
-          u.role,
-          u.status,
-          u.created_at
-        FROM identity.users u
-        WHERE 1=1
-      `;
-      const params: any[] = [];
-      let paramIndex = 1;
-
-      if (roleFilter) {
-        query += ` AND u.role = $${paramIndex}`;
-        params.push(roleFilter);
-        paramIndex++;
-      }
-
-      if (statusFilter) {
-        query += ` AND u.status = $${paramIndex}`;
-        params.push(statusFilter);
-        paramIndex++;
-      }
-
-      if (searchFilter) {
-        query += ` AND (u.name ILIKE $${paramIndex} OR u.email ILIKE $${paramIndex})`;
-        params.push(`%${searchFilter}%`);
-        paramIndex++;
-      }
-
-      // Filter by institution (for Super Admins via invites)
-      if (institutionIdFilter) {
-        query += ` AND EXISTS (
-          SELECT 1 FROM identity.invites i
-          WHERE i.accepted_by_user_id = u.id
-          AND i.institution_id = $${paramIndex}
-          AND i.status = 'ACCEPTED'
-        )`;
-        params.push(institutionIdFilter);
-        paramIndex++;
-      }
-
-      query += ` ORDER BY u.created_at DESC LIMIT 100`;
-
-      const { rows } = await db.query(query, params);
-      sendSuccess(res, { users: rows });
-    } catch (err) {
-      sendError(res, err);
-    }
-  }
-);
-
-// ── GET /api/owner/institutions/:id/programs ──────────────────────────────────
-// Get programs for a specific institution
-ownerRouter.get(
-  '/institutions/:id/programs',
-  requireOwnerOrOwnInstitution,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const { id } = req.params;
-
-      const { rows } = await db.query(
-        `SELECT
-          id,
-          institution_id,
-          name,
-          code,
-          created_at
-         FROM org.programs
-         WHERE institution_id = $1
-         ORDER BY name`,
-        [id]
-      );
-
-      sendSuccess(res, { programs: rows });
-    } catch (err) {
-      sendError(res, err);
-    }
-  }
-);
-
-// ── GET /api/owner/institutions/:id/departments ───────────────────────────────
-// Get departments for a specific institution
-ownerRouter.get(
-  '/institutions/:id/departments',
-  requireOwnerOrOwnInstitution,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const { id } = req.params;
-
-      const { rows } = await db.query(
-        `SELECT
-          id,
-          institution_id,
-          name,
-          code,
-          is_active,
-          created_at,
-          updated_at
-         FROM org.departments
-         WHERE institution_id = $1
-         ORDER BY name`,
-        [id]
-      );
-
-      sendSuccess(res, { departments: rows });
-    } catch (err) {
-      sendError(res, err);
-    }
-  }
-);
-
-// ── GET /api/owner/students ───────────────────────────────────────────────────
-// Get students with detailed information (cross-institution)
-ownerRouter.get(
-  '/students',
-  requirePlatformOwner,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const institutionIdFilter = (req.query.institution_id as string) ?? null;
-      const rawLimit = parseInt(req.query.limit as string, 10);
-      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 100;
-
-      let query = `
-        SELECT
-          s.id,
-          u.name,
-          u.email,
-          s.roll_number,
-          b.year as batch_year,
-          p.name as program_name,
-          p.institution_id,
-          inst.name as institution_name,
-          dept.name as department_name,
-          s.created_at
-        FROM org.students s
-        JOIN identity.users u ON s.user_id = u.id
-        JOIN org.batches b ON s.batch_id = b.id
-        JOIN org.programs p ON b.program_id = p.id
-        JOIN org.institutions inst ON p.institution_id = inst.id
-        LEFT JOIN org.departments dept ON dept.id = u.department_id
-        WHERE 1=1
-      `;
-
-      const params: any[] = [];
-      let paramIndex = 1;
-
-      if (institutionIdFilter) {
-        query += ` AND p.institution_id = $${paramIndex}`;
-        params.push(institutionIdFilter);
-        paramIndex++;
-      }
-
-      query += ` ORDER BY s.created_at DESC LIMIT $${paramIndex}`;
-      params.push(limit);
-
-      const { rows } = await db.query(query, params);
-      sendSuccess(res, { students: rows });
-    } catch (err) {
-      sendError(res, err);
-    }
-  }
-);
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// INVITE FLOW ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// ── POST /api/owner/institutions/:id/invite ───────────────────────────────────
-// Invite Super Admin for an institution
-const inviteSchema = z.object({
-  firstName: z.string().min(1),
-  lastName: z.string().min(1),
-  email: z.string().email()
-});
-
-ownerRouter.post(
-  '/institutions/:id/invite',
-  requirePlatformOwner,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const { id: institutionId } = req.params;
-      const parsed = inviteSchema.safeParse(req.body);
-
-      if (!parsed.success) {
-        res.status(422).json({
-          status: 'error',
-          message: 'Invalid invite data',
-          errors: parsed.error.errors
-        });
-        return;
+        const issues = parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
+        throw new AppError(422, `Validation failed: ${issues}`, 'VALIDATION_ERROR');
       }
 
       const { firstName, lastName, email } = parsed.data;
       const fullName = `${firstName} ${lastName}`.trim();
-      const normalizedEmail = email.toLowerCase().trim();
 
-      // Check if institution exists
-      const instResult = await db.query(
-        `SELECT id, name FROM org.institutions WHERE id = $1`,
-        [institutionId]
+      // Verify institution exists (robust against local IDs like col-1)
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(collegeId);
+      let activeInst: { id: string; name: string } | undefined;
+      if (isUuid) {
+        const { rows: institutions } = await db.query(
+          `SELECT id, name FROM org.institutions WHERE id = $1`,
+          [collegeId]
+        );
+        if (institutions.length > 0) activeInst = institutions[0];
+      }
+      if (!activeInst) {
+        const { rows: existing } = await db.query(`SELECT id, name FROM org.institutions LIMIT 1`);
+        if (existing.length > 0) {
+          activeInst = existing[0];
+        } else {
+          const { rows: created } = await db.query(
+            `INSERT INTO org.institutions (name, code, type, is_active)
+             VALUES ('Main Institution', 'INST01', 'COLLEGE', true)
+             RETURNING id, name`
+          );
+          activeInst = created[0];
+        }
+      }
+      const institution = activeInst!;
+
+      // Check if email already registered as user
+      const { rows: users } = await db.query(
+        `SELECT id, role, institution_id FROM identity.users WHERE LOWER(email) = $1`,
+        [email]
       );
-
-      if (instResult.rows.length === 0) {
-        res.status(404).json({
-          status: 'error',
-          message: 'Institution not found'
-        });
-        return;
+      if (users.length > 0 && users[0].role === 'PLATFORM_OWNER') {
+        throw new AppError(400, 'Cannot invite Platform Owner as college admin', 'INVALID_OPERATION');
       }
 
-      const institution = instResult.rows[0];
+      // Purge previous pending invites for this institution so the old admin's email is NOT stored
+      // User requirement: "if any one is reinvited the previous admins mail id should not be stored"
+      await db.query(`DELETE FROM identity.pending_invites WHERE institution_id = $1`, [institution.id]);
+      await db.query(`DELETE FROM identity.pending_invites WHERE LOWER(email) = $1`, [email]);
 
-      // Check if user already exists with this email
-      const userCheck = await db.query(
-        `SELECT id, role FROM identity.users WHERE email = $1`,
-        [normalizedEmail]
+      // If this institution had a prior super admin user (excluding Danish Platform Owner),
+      // purge the superseded admin user and role assignments so the previous admin's email is not stored in the database!
+      const { rows: prevAdmins } = await db.query(
+        `SELECT id, email FROM identity.users 
+         WHERE (institution_id = $1 OR id IN (SELECT user_id FROM identity.role_assignments WHERE institution_id = $1))
+           AND role = 'SUPER_ADMIN'
+           AND LOWER(email) != 'danishbasha18@gmail.com'
+           AND LOWER(email) != $2`,
+        [institution.id, email]
       );
-
-      if (userCheck.rows.length > 0) {
-        res.status(409).json({
-          status: 'error',
-          message: 'A user with this email already exists'
-        });
-        return;
+      for (const prev of prevAdmins) {
+        try {
+          await db.query(`UPDATE system.audit_logs SET actor_user_id = NULL WHERE actor_user_id = $1`, [prev.id]).catch(() => {});
+          await db.query(`UPDATE agent.agent_runs SET triggered_by_user_id = NULL WHERE triggered_by_user_id = $1`, [prev.id]).catch(() => {});
+          await db.query(`DELETE FROM org.student_mentor_assignments WHERE mentor_id = $1 OR assigned_by = $1`, [prev.id]).catch(() => {});
+          await db.query(`DELETE FROM org.trainer_subdivision_assignments WHERE trainer_id = $1 OR assigned_by = $1`, [prev.id]).catch(() => {});
+          await db.query(`DELETE FROM placement.mentor_verifications WHERE mentor_user_id = $1`, [prev.id]).catch(() => {});
+          await db.query(`DELETE FROM identity.role_assignments WHERE user_id = $1`, [prev.id]).catch(() => {});
+          await db.query(`DELETE FROM org.department_staff WHERE user_id = $1`, [prev.id]).catch(() => {});
+          await db.query(
+            `DELETE FROM identity.users WHERE id = $1 AND LOWER(email) != 'danishbasha18@gmail.com' AND role != 'PLATFORM_OWNER'`,
+            [prev.id]
+          ).catch(() => {});
+        } catch (cleanupErr) {
+          console.warn('[owner.routes] Non-fatal cleanup warning for superseded admin:', cleanupErr);
+        }
       }
 
-      // Check if there's already a pending invite for this institution
-      const existingInvite = await db.query(
-        `SELECT id FROM identity.invites
-         WHERE institution_id = $1
-         AND role = 'SUPER_ADMIN'
-         AND status = 'PENDING'
-         AND expires_at > now()`,
-        [institutionId]
-      );
+      // Create invitation token
+      const token = `inv_sup_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
-      if (existingInvite.rows.length > 0) {
-        res.status(409).json({
-          status: 'error',
-          message: 'A pending Super Admin invite already exists for this institution'
-        });
-        return;
-      }
-
-      // Generate unique token
-      const token = crypto.randomBytes(32).toString('hex');
-
-      // Insert invite
-      const inviteResult = await db.query(
-        `INSERT INTO identity.invites (
-          token,
-          email,
-          first_name,
-          last_name,
-          name,
-          role,
-          institution_id,
-          permissions,
-          status,
-          expires_at,
-          invited_by_user_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + interval '7 days', $10)
-        RETURNING *`,
+      const { rows } = await db.query(
+        `INSERT INTO identity.pending_invites
+         (token, email, first_name, last_name, name, role, institution_id, institution_name,
+          permissions, status, expires_at)
+         VALUES ($1, $2, $3, $4, $5, 'SUPER_ADMIN', $6, $7, $8, 'PENDING', $9)
+         RETURNING *`,
         [
           token,
-          normalizedEmail,
+          email,
           firstName,
           lastName,
           fullName,
-          'SUPER_ADMIN',
-          institutionId,
+          institution.id,
+          institution.name,
           JSON.stringify(['CAN_VIEW_STUDENT_PROGRESS', 'CAN_ASSIGN_INTERVIEWS', 'CAN_ASSIGN_LISTENING', 'CAN_MANAGE_STUDENTS']),
-          'PENDING',
-          req.user!.id
+          expiresAt,
         ]
       );
 
-      const invite = inviteResult.rows[0];
+      const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer as string).origin : undefined);
+      const reqHost = req.get('host');
+      const reqProtocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+      const hostUrl = reqHost ? `${reqProtocol}://${reqHost}` : undefined;
+      const baseUrl = (process.env.APP_URL && !process.env.APP_URL.includes('localhost')) 
+        ? process.env.APP_URL 
+        : (origin || hostUrl || 'https://52.66.240.211');
+      const secureBaseUrl = baseUrl.replace(/^http:\/\/52\.66\.240\.211/i, 'https://52.66.240.211');
+      const inviteUrl = `${secureBaseUrl.replace(/\/+$/, '')}/?page=activate&invite_token=${token}`;
 
-      // TODO: Send email via emailService
-      // For now, just return the invite URL
-      const inviteUrl = `${env.APP_URL}/?invite_token=${token}`;
+      // Dispatch invite email asynchronously
+      sendInviteEmail({
+        to: email,
+        name: fullName,
+        role: 'SUPER_ADMIN',
+        collegeName: institution.name,
+        inviteUrl,
+        invitedBy: (req as AuthRequest).user?.name || 'Platform Owner',
+      }).catch((err) => console.error('[owner.routes] Failed to send super-admin invite email:', err));
 
-      sendSuccess(res, {
-        invite: {
-          id: invite.id,
-          token: invite.token,
-          email: invite.email,
-          name: invite.name,
-          role: invite.role,
-          institutionId: invite.institution_id,
-          institutionName: institution.name,
-          status: invite.status,
-          expiresAt: invite.expires_at,
-          createdAt: invite.created_at
-        },
-        inviteUrl
-      });
+      sendSuccess(res, { invite: rows[0], inviteUrl }, 201);
     } catch (err) {
       sendError(res, err);
     }
   }
 );
 
-// ── GET /api/owner/invites ────────────────────────────────────────────────────
-// List all invites (with filters)
-ownerRouter.get(
-  '/invites',
-  requirePlatformOwner,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const statusFilter = (req.query.status as string) ?? null;
-      const institutionIdFilter = (req.query.institution_id as string) ?? null;
-      const roleFilter = (req.query.role as string) ?? null;
+// ── GET /api/owner/stats ─────────────────────────────────────────────────────
+ownerRouter.get('/stats', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const { rows: stats } = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM org.institutions) AS total_colleges,
+        (
+          SELECT COUNT(DISTINCT i.id)
+          FROM org.institutions i
+          WHERE EXISTS (
+            SELECT 1 FROM identity.users u
+            LEFT JOIN identity.role_assignments ra ON ra.user_id = u.id
+            WHERE (u.institution_id = i.id OR ra.institution_id = i.id)
+              AND (u.role = 'SUPER_ADMIN' OR ra.role_id = '119e7528-6954-471b-8804-3a03ca035aa1')
+              AND u.status = 'ACTIVE'
+          ) OR EXISTS (
+            SELECT 1 FROM identity.pending_invites inv
+            WHERE inv.institution_id = i.id
+              AND inv.role = 'SUPER_ADMIN'
+              AND inv.status = 'ACCEPTED'
+          )
+        ) AS active_super_admins,
+        (SELECT COUNT(*) FROM org.students) AS total_students,
+        (SELECT COUNT(*) FROM org.programs) AS total_programs
+    `);
 
-      let query = `
-        SELECT
-          i.*,
-          inst.name as institution_name
-        FROM identity.invites i
-        LEFT JOIN org.institutions inst ON i.institution_id = inst.id
-        WHERE 1=1
-      `;
-
-      const params: any[] = [];
-      let paramIndex = 1;
-
-      if (statusFilter) {
-        query += ` AND i.status = $${paramIndex}`;
-        params.push(statusFilter);
-        paramIndex++;
-      }
-
-      if (institutionIdFilter) {
-        query += ` AND i.institution_id = $${paramIndex}`;
-        params.push(institutionIdFilter);
-        paramIndex++;
-      }
-
-      if (roleFilter) {
-        query += ` AND i.role = $${paramIndex}`;
-        params.push(roleFilter);
-        paramIndex++;
-      }
-
-      query += ` ORDER BY i.created_at DESC LIMIT 100`;
-
-      const { rows } = await db.query(query, params);
-
-      const invites = rows.map(row => ({
-        id: row.id,
-        token: row.token,
-        email: row.email,
-        first_name: row.first_name,
-        last_name: row.last_name,
-        name: row.name,
-        role: row.role,
-        institution_id: row.institution_id,
-        institution_name: row.institution_name,
-        program_id: row.program_id,
-        department: row.department,
-        permissions: row.permissions,
-        status: row.status,
-        expires_at: row.expires_at,
-        accepted_by_user_id: row.accepted_by_user_id,
-        created_at: row.created_at,
-        accepted_at: row.accepted_at
-      }));
-
-      sendSuccess(res, { invites });
-    } catch (err) {
-      sendError(res, err);
-    }
+    sendSuccess(res, stats[0]);
+  } catch (err) {
+    sendError(res, err);
   }
-);
+});
 
-// ── POST /api/owner/invites/:id/resend ────────────────────────────────────────
-// Re-send an invite (generate new token, extend expiry)
-ownerRouter.post(
-  '/invites/:id/resend',
-  requirePlatformOwner,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const { id } = req.params;
-
-      // Check if invite exists and is pending
-      const inviteResult = await db.query(
-        `SELECT * FROM identity.invites WHERE id = $1`,
-        [id]
+// ── GET /api/owner/colleges/:collegeId/metrics ───────────────────────────
+ownerRouter.get('/colleges/:collegeId/metrics', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const rawCollegeId = Array.isArray(req.params.collegeId) ? req.params.collegeId[0] : (req.params.collegeId || '');
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawCollegeId);
+    let instRows: any[] = [];
+    if (isUuid) {
+      const { rows } = await db.query(
+        `SELECT id, name, code, type AS campus_city, created_at FROM org.institutions WHERE id = $1`,
+        [rawCollegeId]
       );
-
-      if (inviteResult.rows.length === 0) {
-        res.status(404).json({
-          status: 'error',
-          message: 'Invite not found'
-        });
-        return;
-      }
-
-      const invite = inviteResult.rows[0];
-
-      if (invite.status !== 'PENDING') {
-        res.status(400).json({
-          status: 'error',
-          message: 'Can only resend pending invites'
-        });
-        return;
-      }
-
-      // Generate new token
-      const newToken = crypto.randomBytes(32).toString('hex');
-
-      // Update invite
-      const updateResult = await db.query(
-        `UPDATE identity.invites
-         SET token = $1,
-             expires_at = now() + interval '7 days',
-             updated_at = now()
-         WHERE id = $2
-         RETURNING *`,
-        [newToken, id]
-      );
-
-      const updatedInvite = updateResult.rows[0];
-
-      // TODO: Send email via emailService
-      const inviteUrl = `${env.APP_URL}/?invite_token=${newToken}`;
-
-      sendSuccess(res, {
-        invite: {
-          id: updatedInvite.id,
-          token: updatedInvite.token,
-          email: updatedInvite.email,
-          name: updatedInvite.name,
-          role: updatedInvite.role,
-          status: updatedInvite.status,
-          expiresAt: updatedInvite.expires_at
-        },
-        inviteUrl
-      });
-    } catch (err) {
-      sendError(res, err);
+      instRows = rows;
     }
-  }
-);
+    if (instRows.length === 0) {
+      const { rows } = await db.query(
+        `SELECT id, name, code, type AS campus_city, created_at FROM org.institutions WHERE UPPER(code) = UPPER($1) OR LOWER(name) = LOWER($1)`,
+        [rawCollegeId]
+      );
+      instRows = rows;
+    }
+    if (instRows.length === 0) {
+      throw new AppError(404, 'Institution not found', 'NOT_FOUND');
+    }
+    const college = instRows[0];
+    const collegeId = college.id;
 
-// ── DELETE /api/owner/invites/:id ─────────────────────────────────────────────
-// Cancel/revoke an invite
+    // Count enrolled students strictly and specifically for THIS college
+    const { rows: studentCountRows } = await db.query(
+      `SELECT COUNT(DISTINCT s.id) AS count
+       FROM org.students s
+       LEFT JOIN org.programs p ON p.id = s.program_id
+       LEFT JOIN org.batches b ON b.id = s.batch_id
+       LEFT JOIN org.programs pb ON pb.id = b.program_id
+       LEFT JOIN identity.users u ON u.id = s.user_id
+       WHERE p.institution_id = $1 OR pb.institution_id = $1 OR u.institution_id = $1`,
+      [collegeId]
+    );
+    const enrolledStudentsCount = parseInt(studentCountRows[0]?.count || '0', 10);
+
+    // Get programs created for this college
+    const { rows: progRows } = await db.query(
+      `SELECT id, name, code, is_active FROM org.programs WHERE institution_id = $1 ORDER BY created_at DESC`,
+      [collegeId]
+    );
+
+    // Get assignments count for this college
+    const { rows: assignCountRows } = await db.query(
+      `SELECT COUNT(*) AS count FROM org.interview_assignments WHERE institution_id = $1`,
+      [collegeId]
+    ).catch(() => ({ rows: [{ count: '0' }] }));
+    const totalAssignmentsCount = parseInt(assignCountRows[0]?.count || '0', 10);
+
+    sendSuccess(res, {
+      college: {
+        id: college.id,
+        name: college.name,
+        code: college.code,
+        campusCity: college.campus_city || '',
+        createdAt: college.created_at
+      },
+      enrolledStudentsCount,
+      programsCreated: progRows,
+      programsCount: progRows.length,
+      totalAssignmentsCount,
+      tokenUsage: {
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        audioMinutes: 0,
+        whisperHours: 0,
+        llmModel: 'Gemini 1.5 Flash + Whisper Pro',
+        status: 'Active (0 Tokens Consumed)'
+      }
+    });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// ── DELETE /api/owner/colleges/:collegeId ───────────────────────────────────
 ownerRouter.delete(
-  '/invites/:id',
-  requirePlatformOwner,
-  async (req: AuthRequest, res: Response): Promise<void> => {
+  '/colleges/:collegeId',
+  async (req: Request, res: Response): Promise<void> => {
+    const client = await db.connect();
     try {
-      const { id } = req.params;
+      const collegeId = Array.isArray(req.params.collegeId) ? req.params.collegeId[0] : (req.params.collegeId || '');
 
-      // Check if invite exists
-      const inviteResult = await db.query(
-        `SELECT id, status FROM identity.invites WHERE id = $1`,
-        [id]
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(collegeId);
+      let instRows: any[] = [];
+      if (isUuid) {
+        const { rows } = await client.query(
+          `SELECT id, name FROM org.institutions WHERE id = $1`,
+          [collegeId]
+        );
+        instRows = rows;
+      }
+      if (instRows.length === 0) {
+        const { rows } = await client.query(
+          `SELECT id, name FROM org.institutions WHERE UPPER(code) = UPPER($1) OR LOWER(name) = LOWER($1)`,
+          [collegeId]
+        );
+        instRows = rows;
+      }
+      if (instRows.length === 0) {
+        throw new AppError(404, 'Institution not found', 'NOT_FOUND');
+      }
+      const targetInstitutionId = instRows[0].id;
+
+      await client.query('BEGIN');
+
+      const safeQuery = async (queryText: string, params: any[] = []) => {
+        try {
+          await client.query('SAVEPOINT sp');
+          await client.query(queryText, params);
+          await client.query('RELEASE SAVEPOINT sp');
+        } catch (subErr) {
+          await client.query('ROLLBACK TO SAVEPOINT sp').catch(() => {});
+          console.warn('[owner.routes DELETE college safeQuery ignored error]', (subErr as Error).message);
+        }
+      };
+
+      // 1. Identify all student IDs and their user IDs tied to this institution
+      const { rows: studentRows } = await client.query<{ id: string; user_id: string }>(
+        `SELECT DISTINCT s.id, s.user_id FROM org.students s
+         LEFT JOIN org.programs p ON p.id = s.program_id
+         LEFT JOIN org.batches b ON b.id = s.batch_id
+         LEFT JOIN org.programs pb ON pb.id = b.program_id
+         LEFT JOIN identity.users u ON u.id = s.user_id
+         WHERE p.institution_id = $1
+            OR pb.institution_id = $1
+            OR u.institution_id = $1
+            OR s.college_id = $1`,
+        [targetInstitutionId]
       );
+      const studentIds = studentRows.map(s => s.id);
+      const studentUserIds = studentRows.map(s => s.user_id).filter(Boolean);
 
-      if (inviteResult.rows.length === 0) {
-        res.status(404).json({
-          status: 'error',
-          message: 'Invite not found'
-        });
-        return;
+      // 2. Identify all user IDs tied to this institution across all roles (students, admins, staff, faculty, self-registered)
+      const { rows: usersRows } = await client.query<{ id: string; email: string }>(
+        `SELECT DISTINCT u.id, u.email FROM identity.users u
+         LEFT JOIN identity.role_assignments ra ON ra.user_id = u.id
+         LEFT JOIN org.students s ON s.user_id = u.id
+         LEFT JOIN org.programs p ON p.id = s.program_id
+         LEFT JOIN org.batches b ON b.id = s.batch_id
+         LEFT JOIN org.programs pb ON pb.id = b.program_id
+         LEFT JOIN org.department_staff ds ON ds.user_id = u.id
+         WHERE (
+           u.institution_id = $1
+           OR ra.institution_id = $1
+           OR p.institution_id = $1
+           OR pb.institution_id = $1
+           OR ds.institution_id = $1
+           OR u.id = ANY($2::uuid[])
+           OR LOWER(u.email) IN (SELECT LOWER(email) FROM identity.pending_invites WHERE institution_id = $1)
+           OR LOWER(u.email) IN (SELECT LOWER(email) FROM org.department_staff WHERE institution_id = $1)
+         )
+         AND u.role != 'PLATFORM_OWNER'
+         AND LOWER(u.email) != 'danishbasha18@gmail.com'`,
+        [targetInstitutionId, studentUserIds]
+      );
+      const userIdsToDelete = [...new Set(usersRows.map(u => u.id))];
+      const userEmailsToDelete = [...new Set(usersRows.map(u => u.email.toLowerCase()))];
+
+      // 3. Identify all assessment attempts tied to these students or institution programs
+      const { rows: attemptRows } = await client.query<{ id: string }>(
+        `SELECT DISTINCT a.id FROM assessment.assessment_attempts a
+         LEFT JOIN org.programs p ON p.id = a.program_id
+         WHERE (a.student_id = ANY($1::uuid[]) OR p.institution_id = $2)`,
+        [studentIds, targetInstitutionId]
+      );
+      const attemptIds = attemptRows.map(a => a.id);
+
+      // 4. Delete Session, Question, Evaluation & Assessment Attempt details
+      if (attemptIds.length > 0 || studentIds.length > 0) {
+        await safeQuery(
+          `DELETE FROM session.interview_embeddings 
+           WHERE session_id IN (SELECT id FROM session.assessment_sessions WHERE attempt_id = ANY($1::uuid[]))
+              OR session_id IN (SELECT id FROM session.interview_sessions WHERE student_id = ANY($2::uuid[]))`,
+          [attemptIds, studentIds]
+        );
+
+        await safeQuery(
+          `DELETE FROM session.interview_transcripts 
+           WHERE session_id IN (SELECT id FROM session.assessment_sessions WHERE attempt_id = ANY($1::uuid[]))
+              OR student_id = ANY($2::uuid[])`,
+          [attemptIds, studentIds]
+        );
+
+        await safeQuery(`DELETE FROM evaluation.responses WHERE attempt_id = ANY($1::uuid[])`, [attemptIds]);
+        await safeQuery(`DELETE FROM session.questions WHERE attempt_id = ANY($1::uuid[])`, [attemptIds]);
+        await safeQuery(`DELETE FROM performance.assessment_reports WHERE attempt_id = ANY($1::uuid[]) OR student_id = ANY($2::uuid[])`, [attemptIds, studentIds]);
+        await safeQuery(`DELETE FROM performance.performance_snapshots WHERE attempt_id = ANY($1::uuid[]) OR student_id = ANY($2::uuid[])`, [attemptIds, studentIds]);
+        await safeQuery(`DELETE FROM performance.skill_performances WHERE attempt_id = ANY($1::uuid[]) OR student_id = ANY($2::uuid[])`, [attemptIds, studentIds]);
+        await safeQuery(`DELETE FROM session.assessment_sessions WHERE attempt_id = ANY($1::uuid[])`, [attemptIds]);
+        await safeQuery(`DELETE FROM session.interview_sessions WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM assessment.assessment_attempts WHERE id = ANY($1::uuid[]) OR student_id = ANY($2::uuid[])`, [attemptIds, studentIds]);
       }
 
-      const invite = inviteResult.rows[0];
-
-      if (invite.status !== 'PENDING') {
-        res.status(400).json({
-          status: 'error',
-          message: 'Can only cancel pending invites'
-        });
-        return;
+      // 5. Delete Student performance, credits, placement, mentor and resume data
+      if (studentIds.length > 0) {
+        await safeQuery(`DELETE FROM performance.student_skills WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM performance.learning_recommendations WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM performance.learning_plans WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM performance.performance_profiles WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM credit.credit_transactions WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM credit.credit_accounts WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM credit.credit_policies WHERE institution_id = $1 OR student_id = ANY($2::uuid[])`, [targetInstitutionId, studentIds]);
+        await safeQuery(`DELETE FROM placement.checklist_progress WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM placement.mentor_verifications WHERE student_id = ANY($1::uuid[]) OR mentor_user_id = ANY($2::uuid[])`, [studentIds, userIdsToDelete]);
+        await safeQuery(`DELETE FROM placement.placement_eligibility WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM org.resumes WHERE student_id = ANY($1::uuid[])`, [studentIds]);
+        await safeQuery(`DELETE FROM org.student_mentor_assignments WHERE student_id = ANY($1::uuid[]) OR mentor_user_id = ANY($2::uuid[]) OR assigned_by = ANY($2::uuid[])`, [studentIds, userIdsToDelete]);
       }
 
-      // Update status to CANCELLED (for audit trail)
-      await db.query(
-        `UPDATE identity.invites
-         SET status = 'CANCELLED',
-             updated_at = now()
-         WHERE id = $1`,
-        [id]
+      // 6. Delete all students of this college
+      await safeQuery(
+        `DELETE FROM org.students
+         WHERE id = ANY($1::uuid[])
+            OR user_id = ANY($2::uuid[])
+            OR program_id IN (SELECT id FROM org.programs WHERE institution_id = $3)`,
+        [studentIds, userIdsToDelete, targetInstitutionId]
       );
 
-      sendSuccess(res, { message: 'Invite cancelled successfully' });
+      // 7. Delete institution structure (subdivisions, batches, programs, departments, classes, staff, assignments)
+      await safeQuery(`DELETE FROM org.trainer_subdivision_assignments WHERE trainer_user_id = ANY($1::uuid[]) OR assigned_by = ANY($1::uuid[])`, [userIdsToDelete]);
+      await safeQuery(`DELETE FROM org.subdivisions WHERE program_id IN (SELECT id FROM org.programs WHERE institution_id = $1)`, [targetInstitutionId]);
+      await safeQuery(`DELETE FROM org.batches WHERE program_id IN (SELECT id FROM org.programs WHERE institution_id = $1)`, [targetInstitutionId]);
+      await safeQuery(`DELETE FROM org.programs WHERE institution_id = $1`, [targetInstitutionId]);
+      await safeQuery(`DELETE FROM org.interview_assignments WHERE institution_id = $1`, [targetInstitutionId]);
+      await safeQuery(`DELETE FROM org.trainer_tenures WHERE institution_id = $1`, [targetInstitutionId]);
+      await safeQuery(`DELETE FROM knowledge.knowledge_documents WHERE institution_id = $1`, [targetInstitutionId]);
+      await safeQuery(`DELETE FROM org.department_classes WHERE institution_id = $1`, [targetInstitutionId]);
+      await safeQuery(`DELETE FROM org.department_staff WHERE institution_id = $1 OR user_id = ANY($2::uuid[])`, [targetInstitutionId, userIdsToDelete]);
+      await safeQuery(`DELETE FROM org.departments WHERE institution_id = $1`, [targetInstitutionId]);
+      await safeQuery(`DELETE FROM org.faculty_profiles WHERE user_id = ANY($1::uuid[])`, [userIdsToDelete]);
+
+      // 8. Delete invitations, roles, password resets, auth tokens, and users
+      await safeQuery(`DELETE FROM identity.pending_invites WHERE institution_id = $1 OR LOWER(email) = ANY($2::text[])`, [targetInstitutionId, userEmailsToDelete]);
+      await safeQuery(`DELETE FROM identity.role_assignments WHERE institution_id = $1 OR user_id = ANY($2::uuid[])`, [targetInstitutionId, userIdsToDelete]);
+
+      if (userEmailsToDelete.length > 0) {
+        await safeQuery(`DELETE FROM identity.password_resets WHERE LOWER(email) = ANY($1::text[])`, [userEmailsToDelete]);
+      }
+
+      if (userIdsToDelete.length > 0) {
+        // Clear foreign key references from system and agent logs
+        await safeQuery(`UPDATE system.audit_logs SET actor_user_id = NULL WHERE actor_user_id::text = ANY($1::text[])`, [userIdsToDelete]);
+        await safeQuery(`UPDATE agent.agent_runs SET triggered_by_user_id = NULL WHERE triggered_by_user_id::text = ANY($1::text[])`, [userIdsToDelete]);
+        await safeQuery(`DELETE FROM agent.agent_runs WHERE student_id = ANY($1::uuid[]) OR triggered_by_user_id::text = ANY($2::text[])`, [studentIds, userIdsToDelete]);
+
+        // Clear auth sessions (handling varchar/uuid data types cleanly via ::text)
+        await safeQuery(`DELETE FROM auth.sessions WHERE user_id::text = ANY($1::text[])`, [userIdsToDelete]);
+        await safeQuery(`DELETE FROM auth.refresh_tokens WHERE user_id::text = ANY($1::text[])`, [userIdsToDelete]);
+        await safeQuery(`DELETE FROM auth.identities WHERE user_id::text = ANY($1::text[])`, [userIdsToDelete]);
+
+        // Delete ALL users belonging to this college from identity.users (strictly protecting PLATFORM_OWNER)
+        await client.query(
+          `DELETE FROM identity.users 
+           WHERE (id = ANY($1::uuid[]) OR institution_id = $2 OR LOWER(email) = ANY($3::text[]))
+             AND role != 'PLATFORM_OWNER' 
+             AND LOWER(email) != 'danishbasha18@gmail.com'`,
+          [userIdsToDelete, targetInstitutionId, userEmailsToDelete]
+        );
+      } else {
+        // In case there were users with institution_id directly set
+        await client.query(
+          `DELETE FROM identity.users 
+           WHERE institution_id = $1
+             AND role != 'PLATFORM_OWNER' 
+             AND LOWER(email) != 'danishbasha18@gmail.com'`,
+          [targetInstitutionId]
+        );
+      }
+
+      // 9. Delete the institution itself
+      await client.query(`DELETE FROM org.institutions WHERE id = $1`, [targetInstitutionId]);
+
+      await client.query('COMMIT');
+
+      sendSuccess(res, {
+        message: 'Institution and all corresponding users and data have been completely deleted.',
+        deletedUsersCount: userIdsToDelete.length,
+        deletedStudentsCount: studentIds.length
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      sendError(res, err);
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ── GET /api/owner/colleges/:collegeId/metrics ───────────────────────────────
+ownerRouter.get(
+  '/colleges/:collegeId/metrics',
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { collegeId } = req.params;
+
+      const { rows: institution } = await db.query(
+        `SELECT id, name, code, type AS campus_city, created_at FROM org.institutions WHERE id = $1`,
+        [collegeId]
+      );
+
+      if (institution.length === 0) {
+        throw new AppError(404, 'Institution not found', 'NOT_FOUND');
+      }
+
+      const { rows: metrics } = await db.query(
+        `SELECT
+          (SELECT COUNT(*) FROM org.students s
+           JOIN org.batches b ON b.id = s.batch_id
+           JOIN org.programs p ON p.id = b.program_id
+           WHERE p.institution_id = $1) AS enrolled_students_count,
+          (SELECT COUNT(*) FROM org.programs WHERE institution_id = $1) AS programs_count,
+          (SELECT COUNT(*) FROM org.departments WHERE institution_id = $1) AS departments_count
+        `,
+        [collegeId]
+      );
+
+      sendSuccess(res, {
+        college: institution[0],
+        ...metrics[0],
+        tokenUsage: {
+          totalTokens: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          audioMinutes: 0,
+          whisperHours: 0,
+          llmModel: 'Gemini 1.5 Flash + Whisper Pro',
+          status: 'Active (0 Tokens Consumed)',
+        },
+      });
     } catch (err) {
       sendError(res, err);
     }

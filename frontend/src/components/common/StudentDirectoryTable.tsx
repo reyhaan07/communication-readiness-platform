@@ -54,7 +54,7 @@ export const StudentDirectoryTable: React.FC<StudentDirectoryTableProps> = ({
       if (!matchName && !matchRoll && !matchEmail && !matchDept && !matchBatch) return false;
     }
 
-    const readiness = s.overallReadiness ?? (s.recentReports?.[0]?.overallScore || 75);
+    const readiness = s.overallReadiness ?? (s.recentReports?.[0]?.overallScore || 0);
     if (statusFilter === 'READY' && readiness < 80) return false;
     if (statusFilter === 'IN_PROGRESS' && (readiness < 60 || readiness >= 80)) return false;
     if (statusFilter === 'NEEDS_ATTENTION' && readiness >= 60) return false;
@@ -172,7 +172,7 @@ export const StudentDirectoryTable: React.FC<StudentDirectoryTableProps> = ({
             </thead>
             <tbody className="divide-y divide-neutral-100">
               {sorted.map((student) => {
-                const readiness = student.overallReadiness ?? (student.recentReports?.[0]?.overallScore || 75);
+                const readiness = student.overallReadiness ?? (student.recentReports?.[0]?.overallScore || 0);
                 const drillsCount = (student.recentReports?.length || 0);
 
                 return (
@@ -303,15 +303,6 @@ export const StudentDirectoryTable: React.FC<StudentDirectoryTableProps> = ({
                             <span>Assign</span>
                           </button>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => onSelectStudent && onSelectStudent(student)}
-                          className="px-2.5 py-1 text-xs font-semibold text-neutral-800 hover:text-black bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors cursor-pointer inline-flex items-center space-x-1"
-                          title={`Open ${student.name}'s Student Dashboard`}
-                        >
-                          <LayoutDashboard className="w-3 h-3 text-neutral-600" />
-                          <span>Dashboard</span>
-                        </button>
                       </div>
                     </td>
                   </tr>

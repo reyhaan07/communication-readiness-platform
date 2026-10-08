@@ -55,3 +55,6 @@ ROADMAP.md
 
 # Local-only documents (account lists etc.)
 /private/
+
+# Teammate's project copy (kept locally for comparison; contains his server settings)
+/crp-production-main/

@@ -22,7 +22,7 @@ const schema = z.object({
 
   // Session/Assessment limits
   MAX_QUESTIONS_PER_SESSION: z.coerce.number().default(10),
-  MAX_TAB_SWITCH_LIMIT: z.coerce.number().default(3),
+  MAX_TAB_SWITCH_LIMIT: z.coerce.number().default(4),
 
   // Optional third-party services
   REDIS_URL: z.string().optional(),
@@ -30,12 +30,15 @@ const schema = z.object({
   APP_NAME: z.string().default('AI Interview Platform'),
   APP_URL: z.string().default('http://localhost:5173'),
 
-  // SMTP (Nodemailer) — transactional email
+  // Transactional email: SMTP (Gmail or any SMTP server), Resend, or console (logs only)
+  EMAIL_PROVIDER: z.enum(['gmail', 'smtp', 'resend', 'console']).default('smtp'),
   SMTP_HOST: z.string().default('smtp.gmail.com'),
   SMTP_PORT: z.coerce.number().default(587),
   SMTP_USER: z.string().default(''),
   SMTP_PASS: z.string().default(''),
   SMTP_FROM: z.string().default('noreply@aiinterview.dev'),
+  RESEND_API_KEY: z.string().optional().default(''),
+  RESEND_FROM_EMAIL: z.string().default('noreply@crp.local'),
 });
 
 export const env = schema.parse(process.env);
