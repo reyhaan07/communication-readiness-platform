@@ -12,7 +12,8 @@ import { authenticate, AuthRequest } from '../middleware/authenticate';
 import { requireRole, requireStudentSelfOrStaff } from '../middleware/authorize';
 import { env } from '../config/env';
 import axios from 'axios';
-import { parseResume, saveResumeVersion, getCurrentResume, ParsedResumeData } from '../services/resumeService';
+import { parseResume, saveResumeVersion, getCurrentResume, getStoredResumeData, ParsedResumeData } from '../services/resumeService';
+import { assertStudentAccess } from '../shared/auth/studentScope';
 
 export const studentRouter = Router();
 
@@ -289,6 +290,37 @@ studentRouter.patch(
       await syncResumeData(student.id, student.userId, current?.view ?? null);
 
       sendSuccess(res, { resumeUrl, fileName: req.file.originalname, version, resume: current?.view ?? null });
+    } catch (err) {
+      sendError(res, err);
+    }
+  }
+);
+
+// ── GET /api/students/:studentId/resume — view a student's parsed resume ───────
+// Students see their own, mentors only students assigned to them, other staff any.
+
+studentRouter.get(
+  '/:studentId/resume',
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const studentId = paramStr(req.params.studentId);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(studentId)) {
+        throw new AppError(404, 'Student not found', 'NOT_FOUND');
+      }
+      const { rows } = await db.query('SELECT id FROM org.students WHERE id = $1', [studentId]);
+      if (rows.length === 0) throw new AppError(404, 'Student not found', 'NOT_FOUND');
+      await assertStudentAccess(req.user!, studentId);
+
+      const current = await getCurrentResume(studentId);
+      if (current) {
+        sendSuccess(res, { resume: current.view });
+        return;
+      }
+      // Resumes saved before versioning live on the student record
+      const stored = await getStoredResumeData(studentId);
+      const hasContent = !!stored && (stored.projects.length > 0
+        || Object.values(stored.skills).some((group) => group.length > 0));
+      sendSuccess(res, { resume: hasContent ? { fileName: 'Resume', parsedAt: '', ...stored } : null });
     } catch (err) {
       sendError(res, err);
     }

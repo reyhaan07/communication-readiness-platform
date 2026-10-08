@@ -1619,6 +1619,12 @@ class ApiClient {
   };
 
   student = {
+    // A student's parsed resume: their own, a mentor's assigned students, or any for other staff
+    getResume: async (studentId: string): Promise<ParsedResume | null> => {
+      const res = await this._fetch<{ data: { resume: ParsedResume | null } }>(`/students/${encodeURIComponent(studentId)}/resume`);
+      return res?.data?.resume ?? null;
+    },
+
     getProfile: async (studentId?: string): Promise<StudentProfile> => {
       const endpoint = studentId ? `/students/${encodeURIComponent(studentId)}/profile` : `/students/me`;
       const res = await this._fetch<{ data: { student?: any; profile?: any } }>(endpoint);
