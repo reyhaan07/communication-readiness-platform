@@ -14,6 +14,7 @@ import { env } from '../config/env';
 import axios from 'axios';
 import { parseResume, saveResumeVersion, getCurrentResume, getStoredResumeData, ParsedResumeData } from '../services/resumeService';
 import { assertStudentAccess } from '../shared/auth/studentScope';
+import { getCoins } from '../services/coinService';
 
 export const studentRouter = Router();
 
@@ -70,7 +71,16 @@ async function fetchStudentProfile(identifier: string) {
     query += ` WHERE s.roll_number = $1 OR u.email = $1`;
   }
   const { rows } = await db.query(query, [identifier]);
-  if (rows.length > 0) return rows[0];
+  if (rows.length > 0) {
+    const student = rows[0];
+    // The wallet the interview service charges (credit ledger), not the legacy coins column
+    try {
+      student.coins = (await getCoins(student.id)).coins;
+    } catch (err) {
+      console.warn('[students] coin balance unavailable, using the stored value:', (err as Error).message);
+    }
+    return student;
+  }
 
   // Auto-create student record if user exists
   if (isUuid) {

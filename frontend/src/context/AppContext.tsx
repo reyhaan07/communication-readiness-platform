@@ -747,29 +747,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [sessionCoinAtStake, setSessionCoinAtStake] = useState<boolean>(false);
 
-  // Regains credit up until 5 (capped at 5) upon successful completion without disqualification
-  const restoreSessionCoin = () => {
+  // ── Session coins: the server's credit ledger is the source of truth (charged at
+  // start, +2 capped at 5 on fair completion, lost on abandon/disqualification).
+  // localStorage only caches the last known balance for the first paint.
+  const listeningCoinRefRef = useRef<string | null>(null);
+
+  const applyCoins = (coins: number) => {
     setStudent(prev => {
-      const current = prev.coins ?? 0;
-      // Regains spent 1 coin and earns 1 bonus credit towards 5 (capped at 5)
-      const nextCoins = Math.min(5, current + 2);
       const sKey = prev.id || 'stu-candidate';
       try {
-        localStorage.setItem(`crp_student_coins_${sKey}`, String(nextCoins));
-        if (nextCoins > 0) {
-          localStorage.removeItem(`crp_zero_coins_time_${sKey}`);
-        }
+        localStorage.setItem(`crp_student_coins_${sKey}`, String(coins));
+        if (coins > 0) localStorage.removeItem(`crp_zero_coins_time_${sKey}`);
       } catch {}
-      if (prev.id) {
-        api.student.updateCredits(prev.id, { coins: nextCoins }).catch(() => {});
-      }
-      return { ...prev, coins: nextCoins, zeroCoinsAt: undefined };
+      return {
+        ...prev,
+        coins,
+        zeroCoinsAt: coins === 0 ? (prev.zeroCoinsAt ?? new Date().toISOString()) : undefined,
+      };
     });
-    setSessionCoinAtStake(false);
   };
 
+  const refreshCoins = async () => {
+    try {
+      const { coins } = await api.coins.me();
+      applyCoins(coins);
+    } catch {
+      // keep the last known balance
+    }
+  };
+
+  // Fair completion: the server adds the reward; pick up the new balance
+  const restoreSessionCoin = () => {
+    setSessionCoinAtStake(false);
+    void refreshCoins();
+  };
+
+  const settleCompletedSessionCoins = async (
+    type: 'MOCK_INTERVIEW' | 'LISTENING_COMPREHENSION',
+    report?: DiagnosticReport | null
+  ) => {
+    setSessionCoinAtStake(false);
+    if (type === 'LISTENING_COMPREHENSION' && listeningCoinRefRef.current) {
+      const sessionRef = listeningCoinRefRef.current;
+      listeningCoinRefRef.current = null;
+      try {
+        applyCoins((await api.coins.complete(sessionRef)).coins);
+        return;
+      } catch {
+        // fall through to a plain refresh
+      }
+    }
+    if (typeof report?.coins === 'number') {
+      applyCoins(report.coins);
+      return;
+    }
+    // The completion handler runs just after the final answer — give it a moment
+    setTimeout(() => { void refreshCoins(); }, 1500);
+  };
+
+  // Abandoned: the coin charged at start is simply not given back
   const forfeitSessionCoin = () => {
     setSessionCoinAtStake(false);
+    listeningCoinRefRef.current = null;
+    void refreshCoins();
     setStudent(prev => {
       const sKey = prev.id || 'stu-candidate';
       if ((prev.coins ?? 0) === 0) {
@@ -851,6 +891,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     } catch {}
 
+    // A student refilling their own wallet: show what the server now holds
+    if (currentUser?.role === 'STUDENT') void refreshCoins();
+
     logger.info('SUPER_ADMIN', `Super Admin restored all 5 credits for student ${studentId}`);
   };
 
@@ -874,14 +917,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const zeroTimestamp = parseInt(zeroStored, 10);
           const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
           if (!isNaN(zeroTimestamp) && Date.now() - zeroTimestamp >= THREE_DAYS_MS) {
-            setStudent(prev => {
-              const prevKey = prev.id || 'stu-21cs1084';
-              try {
-                localStorage.setItem(`crp_student_coins_${prevKey}`, '5');
-                localStorage.removeItem(`crp_zero_coins_time_${prevKey}`);
-              } catch {}
-              return { ...prev, coins: 5, zeroCoinsAt: undefined };
-            });
+            // Refilled on the server too, so the interview service sees the same balance
+            void restoreStudentCoinsToFive(sKey);
             logger.info('STUDENT', `3-day cooldown elapsed: Replenished 5 credits for independent student ${sKey}`);
           }
         } else {
@@ -894,6 +931,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const timer = setInterval(checkIndependentCooldown, 5000);
     return () => clearInterval(timer);
   }, [student.isIndependent, student.department, student.track, student.coins, student.id]);
+
+  // Show the server's balance once the student is known (the cached value may be stale)...
+  useEffect(() => {
+    if (isAuthenticated && student.id && currentUser?.role === 'STUDENT') {
+      void refreshCoins();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, student.id, currentUser?.role]);
+
+  // ...and again whenever the tab comes back into focus (e.g. after an admin restore)
+  useEffect(() => {
+    const sync = () => {
+      if (isAuthenticated && currentUser?.role === 'STUDENT') void refreshCoins();
+    };
+    window.addEventListener('focus', sync);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      window.removeEventListener('focus', sync);
+      document.removeEventListener('visibilitychange', sync);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, currentUser?.role]);
   const [trainerTenures, setTrainerTenures] = useState<TrainerTenure[]>([]);
   const [assignments, setAssignments] = useState<InterviewAssignment[]>([]);
   const [activeAssignment, setActiveAssignment] = useState<InterviewAssignment | null>(null);
@@ -1221,10 +1280,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    const currentCoins = student.coins ?? 5;
-    const safeCoins = currentCoins < 1 ? 5 : currentCoins;
-    if (currentCoins < 1) {
-      setStudent(prev => ({ ...prev, coins: 5 }));
+    // Listening sessions are scored in the browser; the server still charges the coin
+    if (type === 'LISTENING_COMPREHENSION') {
+      try {
+        const { sessionRef, coins } = await api.coins.spend('LISTENING_COMPREHENSION');
+        listeningCoinRefRef.current = sessionRef;
+        applyCoins(coins);
+      } catch (err) {
+        void refreshCoins();
+        alert(`Could not start the session: ${err instanceof Error ? err.message : 'the server is unavailable'}`);
+        return;
+      }
     }
 
     setSessionCoinAtStake(true);
@@ -1242,16 +1308,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     try {
       const data = await api.interview.start(student.id || 'stu-21cs1084', type, targetTopic, student.resume);
-      const remainingCoins = typeof data.coinsRemaining === 'number' ? data.coinsRemaining : Math.max(0, safeCoins - 1);
-      const sKey = student.id || 'stu-21cs1084';
-      try {
-        localStorage.setItem(`crp_student_coins_${sKey}`, String(remainingCoins));
-      } catch {}
-      setStudent(prev => ({ 
-        ...prev, 
-        coins: remainingCoins,
-        zeroCoinsAt: remainingCoins === 0 ? new Date().toISOString() : undefined
-      }));
+      // A mock interview is charged by the server when it creates the session
+      if (typeof data.coinsRemaining === 'number') applyCoins(data.coinsRemaining);
 
       setInterviewState({
         isActive: true,
@@ -1271,7 +1329,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setActiveView(type === 'MOCK_INTERVIEW' ? 'INTERVIEW_ROOM' : 'LISTENING_ROOM');
     } catch (err) {
       if (type === 'MOCK_INTERVIEW') {
-        // A mock interview runs only on the live interview server; never on made-up questions
+        // A mock interview runs only on the live interview server; never on made-up questions.
+        // The server charges only for a session it created, so show its balance (e.g. 0).
+        void refreshCoins();
         setSessionCoinAtStake(false);
         if (typeof document !== 'undefined' && document.fullscreenElement) document.exitFullscreen().catch(() => {});
         alert(`Could not start the interview: ${err instanceof Error ? err.message : 'the server is unavailable'}`);
@@ -1321,9 +1381,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const wasDisqualified = interviewState.isDisqualified || interviewState.tabSwitches >= 4;
     if (!wasDisqualified) {
-      restoreSessionCoin();
+      void settleCompletedSessionCoins(type, providedReport);
     } else {
+      listeningCoinRefRef.current = null;
       setSessionCoinAtStake(false);
+      void refreshCoins();
     }
 
     setInterviewState(prev => ({

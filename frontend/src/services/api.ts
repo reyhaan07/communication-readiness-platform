@@ -1751,6 +1751,28 @@ class ApiClient {
     }
   };
 
+  // Session coins live on the server (credit ledger); see backend coinService.ts
+  coins = {
+    me: async (): Promise<{ coins: number; maxCoins: number }> => {
+      const res = await this._fetch<{ data: { coins: number; maxCoins: number } }>('/coins/me');
+      return res.data;
+    },
+    spend: async (purpose: 'LISTENING_COMPREHENSION'): Promise<{ sessionRef: string; coins: number }> => {
+      const res = await this._fetch<{ data: { sessionRef: string; coins: number } }>('/coins/me/spend', {
+        method: 'POST',
+        body: JSON.stringify({ purpose }),
+      });
+      return res.data;
+    },
+    complete: async (sessionRef: string): Promise<{ coins: number }> => {
+      const res = await this._fetch<{ data: { coins: number } }>('/coins/me/complete', {
+        method: 'POST',
+        body: JSON.stringify({ sessionRef }),
+      });
+      return res.data;
+    },
+  };
+
   // The 4-week plan the learning agent builds from the latest mock interview
   learning = {
     getCurrentPlan: async (studentId: string): Promise<CurrentLearningPlan> => {
