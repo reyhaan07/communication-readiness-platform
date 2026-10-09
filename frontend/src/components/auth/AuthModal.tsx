@@ -463,10 +463,10 @@ export const AuthModal: React.FC = () => {
                   <input
                     type={showRegPassword ? 'text' : 'password'}
                     required
-                    minLength={6}
+                    minLength={8}
                     value={regPassword}
                     onChange={(e) => setRegPassword(e.target.value)}
-                    placeholder="At least 6 characters"
+                    placeholder="At least 8 characters"
                     className="w-full pl-9 pr-9 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-xs focus:outline-none focus:border-neutral-900 transition-colors"
                   />
                   <button
@@ -486,7 +486,7 @@ export const AuthModal: React.FC = () => {
                   <input
                     type={showRegConfirmPassword ? 'text' : 'password'}
                     required
-                    minLength={6}
+                    minLength={8}
                     value={regConfirmPassword}
                     onChange={(e) => setRegConfirmPassword(e.target.value)}
                     placeholder="Re-type your password"
@@ -778,7 +778,7 @@ export const AuthModal: React.FC = () => {
                     <input
                       type={showInstPassword ? 'text' : 'password'}
                       required
-                      minLength={6}
+                      minLength={8}
                       value={instPassword}
                       onChange={(e) => setInstPassword(e.target.value)}
                       placeholder="Create a strong password (min 6 characters)"
@@ -801,7 +801,7 @@ export const AuthModal: React.FC = () => {
                     <input
                       type={showInstConfirmPassword ? 'text' : 'password'}
                       required
-                      minLength={6}
+                      minLength={8}
                       value={instConfirmPassword}
                       onChange={(e) => setInstConfirmPassword(e.target.value)}
                       placeholder="Re-type your password"
