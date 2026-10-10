@@ -14,7 +14,7 @@ import { env } from '../config/env';
 import axios from 'axios';
 import { parseResume, saveResumeVersion, getCurrentResume, getStoredResumeData, ParsedResumeData } from '../services/resumeService';
 import { assertStudentAccess } from '../shared/auth/studentScope';
-import { getCoins } from '../services/coinService';
+import { getCoins, setCoins, MAX_COINS } from '../services/coinService';
 
 export const studentRouter = Router();
 
@@ -27,6 +27,13 @@ const upload = multer({
 
 function paramStr(p: string | string[] | undefined): string {
   return Array.isArray(p) ? (p[0] || '') : (p || '');
+}
+
+// A student may only read or change their own record (staff keep their existing access)
+function assertOwnRecordIfStudent(req: AuthRequest, student: { userId?: string }): void {
+  if (req.user?.role === 'STUDENT' && student.userId !== req.user.id) {
+    throw new AppError(403, 'Access denied', 'FORBIDDEN');
+  }
 }
 
 async function fetchStudentProfile(identifier: string) {
@@ -163,6 +170,7 @@ studentRouter.get(
       if (!student) {
         throw new AppError(404, 'Student not found', 'NOT_FOUND');
       }
+      assertOwnRecordIfStudent(req, student);
       sendSuccess(res, { student, profile: student });
     } catch (err) {
       sendError(res, err);
@@ -438,6 +446,7 @@ studentRouter.all(
 
       const student = await fetchStudentProfile(studentId);
       if (!student) throw new AppError(404, 'Student not found', 'NOT_FOUND');
+      assertOwnRecordIfStudent(req, student);
 
       const stuUpdates: string[] = [];
       const stuValues: any[] = [];
@@ -540,6 +549,7 @@ studentRouter.post(
       const handles = req.body;
       const student = await fetchStudentProfile(studentId);
       if (!student) throw new AppError(404, 'Student not found', 'NOT_FOUND');
+      assertOwnRecordIfStudent(req, student);
 
       const merged = {
         ...(student.codingHandles || {}),
@@ -598,6 +608,7 @@ studentRouter.post(
       const { taskId } = req.body;
       const student = await fetchStudentProfile(studentId);
       if (!student) throw new AppError(404, 'Student not found', 'NOT_FOUND');
+      assertOwnRecordIfStudent(req, student);
 
       let tasks = Array.isArray(student.criteriaTasks) ? [...student.criteriaTasks] : [];
       let isCompleted = false;
@@ -638,6 +649,8 @@ studentRouter.post(
     try {
       const studentId = paramStr(req.params.studentId);
       const { taskId } = req.body;
+      // Verification is the mentor's sign-off; a student cannot verify their own task
+      if (req.user!.role === 'STUDENT') throw new AppError(403, 'Only staff can verify a task', 'FORBIDDEN');
       const student = await fetchStudentProfile(studentId);
       if (!student) throw new AppError(404, 'Student not found', 'NOT_FOUND');
 
@@ -670,6 +683,7 @@ studentRouter.post(
       const report = req.body;
       const student = await fetchStudentProfile(studentId);
       if (!student) throw new AppError(404, 'Student not found', 'NOT_FOUND');
+      assertOwnRecordIfStudent(req, student);
 
       let reports = Array.isArray(student.recentReports) ? [report, ...student.recentReports] : [report];
       const newScore = report.overallScore || student.score || 75;
@@ -759,7 +773,7 @@ studentRouter.get(
 // ── PATCH /api/students/:studentId/credits ───────────────────────────────────
 studentRouter.patch(
   '/:studentId/credits',
-  async (req: Request, res: Response): Promise<void> => {
+  async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const studentId = paramStr(req.params.studentId);
       const { coins, action } = req.body;
@@ -773,35 +787,37 @@ studentRouter.patch(
       }
       const student = studentRows[0];
 
-      let nextCoins = typeof coins === 'number' ? Math.max(0, coins) : (student.coins ?? 5);
-      if (action === 'CONSUME') {
-        nextCoins = Math.max(0, (student.coins ?? 5) - 1);
-      } else if (action === 'RESTORE') {
-        nextCoins = 5;
+      // A student may only refill their own wallet (the refill payment); any other change is staff-only
+      if (req.user!.role === 'STUDENT' && (student.user_id !== req.user!.id || action !== 'RESTORE')) {
+        throw new AppError(403, 'Only your college administrator can change these credits', 'FORBIDDEN');
       }
 
-      // 1. Update org.students
+      // Start from the wallet the interview service charges (the credit ledger)
+      const current = (await getCoins(student.id)).coins;
+      let nextCoins = typeof coins === 'number' ? Math.min(MAX_COINS, Math.max(0, Math.round(coins))) : current;
+      if (action === 'CONSUME') {
+        nextCoins = Math.max(0, current - 1);
+      } else if (action === 'RESTORE') {
+        nextCoins = MAX_COINS;
+      }
+
+      // 1. The ledger itself, recorded as an audited adjustment
+      nextCoins = await setCoins(student.id, nextCoins, req.user!.id);
+
+      // 2. Update org.students
       await db.query(
         `UPDATE org.students SET coins = $1, updated_at = now() WHERE id = $2`,
         [nextCoins, studentId]
       );
 
-      // 2. Update candidate.independent_candidates if present
+      // 3. Update candidate.independent_candidates if present
       await db.query(
-        `UPDATE candidate.independent_candidates 
-         SET credits = $1, 
+        `UPDATE candidate.independent_candidates
+         SET credits = $1,
              zero_credits_at = (CASE WHEN $1 = 0 THEN now() ELSE NULL END),
-             updated_at = now() 
+             updated_at = now()
          WHERE user_id = $2`,
         [nextCoins, student.user_id]
-      ).catch(() => {});
-
-      // 3. Update credit.credit_accounts (1 coin = 10 credits)
-      await db.query(
-        `INSERT INTO credit.credit_accounts (student_id, balance)
-         VALUES ($1, $2)
-         ON CONFLICT (student_id) DO UPDATE SET balance = EXCLUDED.balance, updated_at = now()`,
-        [studentId, nextCoins * 10]
       ).catch(() => {});
 
       sendSuccess(res, {

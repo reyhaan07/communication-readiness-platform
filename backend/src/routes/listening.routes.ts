@@ -172,7 +172,8 @@ listeningRouter.post('/submit-answers', async (req: AuthRequest, res: Response):
     const { sessionId, studentId, topic, passage, answers = [] } = req.body;
     let student: any = null;
     const targetUserId = req.user?.id;
-    if (studentId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(studentId)) {
+    // A student's answers are always their own; the body's studentId is used only for staff
+    if (req.user?.role !== 'STUDENT' && studentId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(studentId)) {
       const { rows } = await db.query(`SELECT id, user_id, program_id, batch_id, track, recent_reports FROM org.students WHERE id = $1`, [studentId]);
       if (rows.length > 0) student = rows[0];
     }
@@ -180,10 +181,8 @@ listeningRouter.post('/submit-answers', async (req: AuthRequest, res: Response):
       const { rows } = await db.query(`SELECT id, user_id, program_id, batch_id, track, recent_reports FROM org.students WHERE user_id = $1`, [targetUserId]);
       if (rows.length > 0) student = rows[0];
     }
-    if (!student) {
-      const { rows } = await db.query(`SELECT id, user_id, program_id, batch_id, track, recent_reports FROM org.students ORDER BY created_at DESC LIMIT 1`);
-      student = rows[0] || null;
-    }
+    // No student record: the answers are still scored, but nothing is saved on anyone's record
+    // (this used to fall back to the most recently created student — someone else's).
 
     const passageQuestions: any[] = passage?.questions || [];
     let totalScore = 0;
@@ -268,12 +267,7 @@ listeningRouter.post('/submit-answers', async (req: AuthRequest, res: Response):
     if (student?.id) {
       await db.query(
         `UPDATE org.students
-         SET recent_reports = jsonb_set(
-           COALESCE(recent_reports, '[]'::jsonb),
-           '{0}',
-           $1::jsonb,
-           true
-         ),
+         SET recent_reports = jsonb_build_array($1::jsonb) || COALESCE(recent_reports, '[]'::jsonb),
          overall_readiness = $2,
          score = $2,
          updated_at = now()

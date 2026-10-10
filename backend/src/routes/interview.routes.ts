@@ -188,8 +188,8 @@ async function resolveStudent(identifier?: string, userId?: string) {
     const { rows: byAuthUser } = await db.query(`SELECT id, user_id, program_id, batch_id, subdivision_id, track, department, resume_data FROM org.students WHERE user_id = $1`, [userId]);
     if (byAuthUser.length > 0) return byAuthUser[0];
   }
-  const { rows } = await db.query(`SELECT id, user_id, program_id, batch_id, subdivision_id, track, department, resume_data FROM org.students ORDER BY created_at DESC LIMIT 1`);
-  return rows[0] || null;
+  // Unknown student: never fall back to another student's record (the newest one used to be taken)
+  return null;
 }
 
 // ── Topic-Specific 15+ Question Repository Helper ─────────────────────────────
@@ -303,7 +303,8 @@ function getTopicQuestionsPool(topic: string, candidateName: string, resumeData?
 interviewRouter.post('/start', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { studentId, domain, topic, difficulty = 'EASY', type = 'MOCK_INTERVIEW' } = req.body;
-    const student = await resolveStudent(studentId, req.user?.id);
+    // A student's session is always their own; the body's studentId is used only for staff
+    const student = await resolveStudent(req.user?.role === 'STUDENT' ? undefined : studentId, req.user?.id);
 
     const candidateName = req.user?.name || 'Candidate';
     const targetTopic = (topic || domain || req.body.domainOrTopic || student?.track || student?.department || 'Full Stack Development').trim();
@@ -374,7 +375,8 @@ interviewRouter.post('/submit-turn', async (req: AuthRequest, res: Response): Pr
       forceConclude
     } = req.body;
 
-    const student = await resolveStudent(studentId, req.user?.id);
+    // A student's session is always their own; the body's studentId is used only for staff
+    const student = await resolveStudent(req.user?.role === 'STUDENT' ? undefined : studentId, req.user?.id);
     const targetTopic = (topic || req.body.domainOrTopic || req.body.domain || currentQuestion?.category || student?.track || student?.department || 'Software Engineering').trim();
 
     // Call Real AI evaluation service
@@ -494,12 +496,7 @@ interviewRouter.post('/submit-turn', async (req: AuthRequest, res: Response): Pr
       if (student?.id) {
         await db.query(
           `UPDATE org.students
-           SET recent_reports = jsonb_set(
-             COALESCE(recent_reports, '[]'::jsonb),
-             '{0}',
-             $1::jsonb,
-             true
-           ),
+           SET recent_reports = jsonb_build_array($1::jsonb) || COALESCE(recent_reports, '[]'::jsonb),
            overall_readiness = $2,
            score = $2,
            updated_at = now()

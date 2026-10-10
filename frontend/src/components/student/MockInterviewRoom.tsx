@@ -828,6 +828,9 @@ export const MockInterviewRoom: React.FC = () => {
 
   const startRecording = async () => {
     if (isSubmittingRef.current || timeUpRef.current) return;
+    // Already listening to this answer: a second recorder would mix two audio streams and
+    // nothing would be transcribed
+    if (isRecordingRef.current && mediaRecorderRef.current?.state === 'recording') return;
     setMicPermissionError(null);
     speechStartTimeRef.current = null;
     lastVoiceActiveTimeRef.current = 0;
